@@ -12,8 +12,8 @@ env:
   # Define environment variables for common values
   RESOURCE_GROUP_NAME: Samuel_KeyVault_RG
   VM_NAME: SamuelKV
-  BICEP_FILE_PATH: AzureKeyVault/bicep/vm-keyvault-extension.bicep
-  PARAMETERS_FILE_PATH: AzureKeyVault/bicep/vm-keyvault-extension.parameters.json
+  BICEP_FILE_PATH: bicep/vm-keyvault-extension.bicep
+  PARAMETERS_FILE_PATH: bicep/vm-keyvault-extension.parameters.json
 
 jobs:
   deploy:
