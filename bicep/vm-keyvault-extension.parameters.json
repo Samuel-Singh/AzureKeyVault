@@ -1,0 +1,26 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "resourceGroupName": {
+      "value": "Samuel_KeyVault_RG"
+    },
+    "vmName": {
+      "value": "SamuelKV"
+    },
+    "observedCertificates": {
+      "value": [
+        {
+          "url": "https://samuelkv.vault.azure.net/secrets/allswellhome/619aa276bab74ab6b0f10fec910d6e62",
+          "certificateStoreName": "MY",
+          "certificateStoreLocation": "LocalMachine"
+        },
+        {
+          "url": "https://samuelkv.vault.azure.net/secrets/testing-selfsigned-cert/58fff60b608f48f7a4adc4713dc25163",
+          "certificateStoreName": "MY",
+          "certificateStoreLocation": "LocalMachine"
+        }
+      ]
+    }
+  }
+}
