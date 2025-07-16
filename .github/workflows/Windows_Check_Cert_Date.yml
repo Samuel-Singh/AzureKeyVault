@@ -1,19 +1,22 @@
-name: Scheduled Key Vault Certificate Renewal
+name: Scheduled Key Vault Certificate Renewal (Combined)
 
 on:
-  workflow_dispatch: # Allow manual trigger
+  workflow_dispatch: # Allows manual trigger
   schedule:
     - cron: '0 0 * * *' # Run once every day at midnight UTC
 
 env:
-  AZURE_SUBSCRIPTION_ID: "51f7ed01-84f6-44ab-aa72-4cfa4a75b9f1" # Set as a repository variable or secret
+  AZURE_SUBSCRIPTION_ID: "51f7ed01-84f6-44ab-aa72-4cfa4a75b9f1"
   KEY_VAULT_NAME: "samuelkv"
-  CERTIFICATE_NAME: "TestingIIScertificate"
-  RENEWAL_THRESHOLD_DAYS: "27"
+  CERTIFICATE_NAME_IN_KV: "TestingIIScertificate" # Name of the certificate in Key Vault
+  CERT_FRIENDLY_NAME: "TestingIIScertificate"             # The Friendly Name you want for the certificate
+  CERT_COMMON_NAME: "TestingIIScertificate"          # Subject Common Name (CN) / DNS Name for the cert
+  CERT_VALIDITY_DAYS: "30"                      # How long the cert is valid
+  RENEWAL_THRESHOLD_DAYS: "31"
 
 jobs:
-  renew_cert:
-    runs-on: ubuntu-latest # or windows-latest if you prefer
+  renew_cert_if_needed:
+    runs-on: windows-latest # Use a Windows runner for PowerShell certificate commands
 
     steps:
       - name: Checkout Repository
@@ -22,22 +25,19 @@ jobs:
       - name: Azure Login
         uses: azure/login@v2
         with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }} # Service Principal with Key Vault Contributor/Officer role
-          # Ensure this SPN has permissions to Get/Set certificates in your Key Vault
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+          # Ensure this Service Principal has 'Key Vault Certificate Officer' role on the Key Vault.
 
-      - name: Run PowerShell to Renew Certificate
-        shell: pwsh # Use PowerShell Core
+      - name: Get Current Certificate Expiration
+        id: get_cert_expiry # Assign an ID to this step to get its outputs
+        shell: pwsh
         run: |
-          # Define script content directly in the workflow
-          $SubscriptionId = "${{ env.AZURE_SUBSCRIPTION_ID }}"
           $KeyVaultName = "${{ env.KEY_VAULT_NAME }}"
-          $CertificateName = "${{ env.CERTIFICATE_NAME }}"
-          $RenewalThresholdDays = ${{ env.RENEWAL_THRESHOLD_DAYS }}
+          $CertificateName = "${{ env.CERTIFICATE_NAME_IN_KV }}"
+          
+          # Set Azure context
+          Set-AzContext -Subscription "${{ env.AZURE_SUBSCRIPTION_ID }}"
 
-          # --- Azure Login (already done by azure/login action, but ensure context is set) ---
-          Set-AzContext -Subscription $SubscriptionId
-
-          # --- Get the current certificate from Key Vault ---
           Write-Host "Retrieving certificate '$CertificateName' from Key Vault '$KeyVaultName'..."
           try {
               $cert = Get-AzKeyVaultCertificate -VaultName $KeyVaultName -Name $CertificateName -ErrorAction Stop
@@ -46,27 +46,63 @@ jobs:
           }
           catch {
               Write-Error "Failed to retrieve certificate '$CertificateName'. Error: $($_.Exception.Message)"
-              exit 1
+              # If cert not found, treat as needing renewal
+              echo "daysRemaining=0" >> $env:GITHUB_OUTPUT
+              exit 0 # Exit with 0 to allow subsequent steps to evaluate the output
           }
 
-          # --- Calculate Days Remaining ---
+          # Calculate Days Remaining
           $daysRemaining = ($currentExpiryDate - (Get-Date)).Days
           Write-Host "Days remaining until expiration: $daysRemaining"
 
-          # --- Conditional Renewal ---
-          if ($daysRemaining -le $RenewalThresholdDays) {
-              Write-Host "Certificate '$CertificateName' is within the renewal threshold ($RenewalThresholdDays days)."
-              Write-Host "Creating a new version of the certificate in Key Vault..."
+          # Output days remaining for subsequent steps to use in their 'if' conditions
+          echo "daysRemaining=$daysRemaining" >> $env:GITHUB_OUTPUT
 
-              try {
-                  $newCert = Add-AzKeyVaultCertificate -VaultName $KeyVaultName -Name $CertificateName -Policy $cert.Policy -ErrorAction Stop
-                  Write-Host "Successfully created new version of certificate '$CertificateName'."
-                  Write-Host "New version expires on: $($newCert.Expires)"
-              }
-              catch {
-                  Write-Error "Failed to create new version of certificate '$CertificateName'. Error: $($_.Exception.Message)"
-                  exit 1
-              }
-          } else {
-              Write-Host "Certificate '$CertificateName' is not yet within the renewal threshold. No action taken."
-          }
+      - name: Generate Self-Signed Certificate and Export PFX
+        id: generate_pfx # Assign an ID for its output
+        shell: pwsh
+        # This step only runs if the certificate is within the renewal threshold
+        if: steps.get_cert_expiry.outputs.daysRemaining <= env.RENEWAL_THRESHOLD_DAYS
+        run: |
+          $certFriendlyName = "${{ env.CERT_FRIENDLY_NAME }}"
+          $certCommonName = "${{ env.CERT_COMMON_NAME }}"
+          $validityDays = ${{ env.CERT_VALIDITY_DAYS }}
+
+          # CRITICAL: Use a GitHub Secret for the PFX password in production
+          $pfxPassword = ConvertTo-SecureString -String "${{ secrets.PFX_PASSWORD }}" -Force -AsPlainText
+          
+          $cert = New-SelfSignedCertificate `
+              -DnsName $certCommonName `
+              -CertStoreLocation "Cert:\CurrentUser\My" `
+              -FriendlyName $certFriendlyName `
+              -NotAfter (Get-Date).AddDays($validityDays) `
+              -KeyUsage DigitalSignature, KeyEncipherment `
+              -TextExtension @("2.5.29.37={text}1.3.6.1.5.5.7.3.1,1.3.6.1.5.5.7.3.2", "2.5.29.19={text}CA=FALSE")
+
+          $pfxPath = "C:\temp\$($certFriendlyName).pfx"
+          Export-PfxCertificate -Cert $cert -FilePath $pfxPath -Password $pfxPassword
+
+          Write-Host "Self-signed certificate '$certFriendlyName' generated and exported to $pfxPath"
+
+          # Output PFX path and password for the next step
+          echo "PFX_PATH=$pfxPath" >> $env:GITHUB_OUTPUT
+          # It's generally not recommended to output secrets, but if needed for next step in same job:
+          echo "PFX_PASSWORD_RAW=${{ secrets.PFX_PASSWORD }}" >> $env:GITHUB_OUTPUT 
+
+      - name: Import PFX into Azure Key Vault
+        shell: pwsh
+        # This step only runs if the certificate generation step ran successfully
+        if: success() && steps.generate_pfx.outputs.PFX_PATH # Ensure this step runs only if the PFX was generated
+        run: |
+          # The password from the previous step (retrieved from GitHub output)
+          $pfxPassword = $env:PFX_PASSWORD_RAW | ConvertTo-SecureString -AsPlainText -Force 
+
+          # Import the PFX into Azure Key Vault
+          Import-AzKeyVaultCertificate `
+              -VaultName "${{ env.KEY_VAULT_NAME }}" `
+              -Name "${{ env.CERTIFICATE_NAME_IN_KV }}" `
+              -FilePath "${{ steps.generate_pfx.outputs.PFX_PATH }}" ` # Use output from previous step
+              -Password $pfxPassword `
+              -ErrorAction Stop
+
+          Write-Host "Certificate '${{ env.CERTIFICATE_NAME_IN_KV }}' (with friendly name '${{ env.CERT_FRIENDLY_NAME }}') imported into Key Vault."
