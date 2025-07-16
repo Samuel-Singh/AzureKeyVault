@@ -31,6 +31,7 @@ resource keyVaultExtension 'Microsoft.Compute/virtualMachines/extensions@2023-09
           certificateStoreName: cert.certificateStoreName
           certificateStoreLocation: cert.certificateStoreLocation
         }]
+        linkOnRenewal: true
       }
     }
   }
