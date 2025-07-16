@@ -9,9 +9,9 @@ env:
   AZURE_SUBSCRIPTION_ID: "51f7ed01-84f6-44ab-aa72-4cfa4a75b9f1"
   KEY_VAULT_NAME: "samuelkv"
   CERTIFICATE_NAME_IN_KV: "TestingIIScertificate" # Name of the certificate in Key Vault
-  CERT_FRIENDLY_NAME: "TestingIIScertificate"             # The Friendly Name you want for the certificate
-  CERT_COMMON_NAME: "TestingIIScertificate"          # Subject Common Name (CN) / DNS Name for the cert
-  CERT_VALIDITY_DAYS: "30"                      # How long the cert is valid
+  CERT_FRIENDLY_NAME: "TestingIIScertificate"     # The Friendly Name you want for the certificate
+  CERT_COMMON_NAME: "TestingIIScertificate"       # Subject Common Name (CN) / DNS Name for the cert
+  CERT_VALIDITY_DAYS: "30"                        # How long the cert is valid
   RENEWAL_THRESHOLD_DAYS: "31"
 
 jobs:
@@ -35,8 +35,8 @@ jobs:
           $KeyVaultName = "${{ env.KEY_VAULT_NAME }}"
           $CertificateName = "${{ env.CERTIFICATE_NAME_IN_KV }}"
           
-          # Set Azure context
-          Set-AzContext -Subscription "${{ env.AZURE_SUBSCRIPTION_ID }}"
+          # Removed: Set-AzContext -Subscription "${{ env.AZURE_SUBSCRIPTION_ID }}"
+          # The 'azure/login' action handles setting the context automatically.
 
           Write-Host "Retrieving certificate '$CertificateName' from Key Vault '$KeyVaultName'..."
           try {
@@ -87,7 +87,7 @@ jobs:
           # Output PFX path and password for the next step
           echo "PFX_PATH=$pfxPath" >> $env:GITHUB_OUTPUT
           # It's generally not recommended to output secrets, but if needed for next step in same job:
-          echo "PFX_PASSWORD_RAW=${{ secrets.PFX_PASSWORD }}" >> $env:GITHUB_OUTPUT 
+          echo "PFX_PASSWORD_RAW=${{ secrets.PFX_PASSWORD }}" >> $env:GITHUB_OUTPUT
 
       - name: Import PFX into Azure Key Vault
         shell: pwsh
@@ -95,7 +95,7 @@ jobs:
         if: success() && steps.generate_pfx.outputs.PFX_PATH # Ensure this step runs only if the PFX was generated
         run: |
           # The password from the previous step (retrieved from GitHub output)
-          $pfxPassword = $env:PFX_PASSWORD_RAW | ConvertTo-SecureString -AsPlainText -Force 
+          $pfxPassword = $env:PFX_PASSWORD_RAW | ConvertTo-SecureString -AsPlainText -Force
 
           # Import the PFX into Azure Key Vault
           Import-AzKeyVaultCertificate `
