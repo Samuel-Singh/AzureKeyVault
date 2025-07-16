@@ -38,4 +38,3 @@ jobs:
           template: ${{ env.BICEP_FILE_PATH }} # Path to your Bicep file
           parameters: ${{ env.PARAMETERS_FILE_PATH }} # Path to your parameter file
           deploymentName: deploy-kv-ext-${{ github.run_id }} # Unique name for the deployment
-          # Removed 'failOnStdErr: true' as it was causing issues with non-critical warnings
