@@ -25,7 +25,7 @@ resource keyVaultExtension 'Microsoft.Compute/virtualMachines/extensions@2023-09
 
     settings: {
       secretsManagementSettings: {
-        pollingIntervalInS: '1800'
+        pollingIntervalInS: '900'
         observedCertificates: [for cert in observedCertificates: {
           url: cert.url
           certificateStoreName: cert.certificateStoreName
