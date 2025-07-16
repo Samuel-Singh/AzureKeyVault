@@ -23,11 +23,12 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Azure Login
-        # CORRECTED: Added 'uses' key for the Azure login action
+        id: az_login # Added ID to capture outputs
         uses: azure/login@v2
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
           # Ensure this Service Principal has 'Key Vault Certificate Officer' role on the Key Vault.
+          enable-AzPSSession: true # This is crucial to enable Az PowerShell session
 
       - name: Get Current Certificate Expiration
         id: get_cert_expiry # Assign an ID to this step to get its outputs
@@ -35,6 +36,24 @@ jobs:
         run: |
           # --- Explicitly import Az.KeyVault module ---
           Import-Module Az.KeyVault -ErrorAction Stop
+
+          # --- Explicitly connect Az PowerShell using Service Principal details from azure/login ---
+          # This is the most reliable way to ensure PowerShell is authenticated
+          Connect-AzAccount -ServicePrincipal `
+              -TenantId "${{ steps.az_login.outputs.tenantId }}" `
+              -ApplicationId "${{ steps.az_login.outputs.clientId }}" `
+              -CertificateThumbprint "${{ steps.az_login.outputs.thumbprint }}" ` # Use thumbprint if using cert-based auth
+              -SubscriptionId "${{ env.AZURE_SUBSCRIPTION_ID }}" `
+              -ErrorAction Stop
+
+          # If using client secret based service principal, use this instead:
+          # Connect-AzAccount -ServicePrincipal `
+          #     -TenantId "${{ steps.az_login.outputs.tenantId }}" `
+          #     -ApplicationId "${{ steps.az_login.outputs.clientId }}" `
+          #     -ClientSecret "${{ secrets.AZURE_CLIENT_SECRET }}" ` # You'd need to pass client secret as a separate secret
+          #     -SubscriptionId "${{ env.AZURE_SUBSCRIPTION_ID }}" `
+          #     -ErrorAction Stop
+
 
           $KeyVaultName = "${{ env.KEY_VAULT_NAME }}"
           $CertificateName = "${{ env.CERTIFICATE_NAME_IN_KV }}"
@@ -65,6 +84,23 @@ jobs:
         # This step only runs if the certificate is within the renewal threshold
         if: steps.get_cert_expiry.outputs.daysRemaining <= env.RENEWAL_THRESHOLD_DAYS
         run: |
+          # --- Explicitly connect Az PowerShell using Service Principal details from azure/login ---
+          # This is the most reliable way to ensure PowerShell is authenticated
+          Connect-AzAccount -ServicePrincipal `
+              -TenantId "${{ steps.az_login.outputs.tenantId }}" `
+              -ApplicationId "${{ steps.az_login.outputs.clientId }}" `
+              -CertificateThumbprint "${{ steps.az_login.outputs.thumbprint }}" ` # Use thumbprint if using cert-based auth
+              -SubscriptionId "${{ env.AZURE_SUBSCRIPTION_ID }}" `
+              -ErrorAction Stop
+
+          # If using client secret based service principal, use this instead:
+          # Connect-AzAccount -ServicePrincipal `
+          #     -TenantId "${{ steps.az_login.outputs.tenantId }}" `
+          #     -ApplicationId "${{ steps.az_login.outputs.clientId }}" `
+          #     -ClientSecret "${{ secrets.AZURE_CLIENT_SECRET }}" ` # You'd need to pass client secret as a separate secret
+          #     -SubscriptionId "${{ env.AZURE_SUBSCRIPTION_ID }}" `
+          #     -ErrorAction Stop
+
           $certFriendlyName = "${{ env.CERT_FRIENDLY_NAME }}"
           $certCommonName = "${{ env.CERT_COMMON_NAME }}"
           $validityDays = ${{ env.CERT_VALIDITY_DAYS }}
@@ -95,6 +131,23 @@ jobs:
         # This step only runs if the certificate generation step ran successfully
         if: success() && steps.generate_pfx.outputs.PFX_PATH # Ensure this step runs only if the PFX was generated
         run: |
+          # --- Explicitly connect Az PowerShell using Service Principal details from azure/login ---
+          # This is the most reliable way to ensure PowerShell is authenticated
+          Connect-AzAccount -ServicePrincipal `
+              -TenantId "${{ steps.az_login.outputs.tenantId }}" `
+              -ApplicationId "${{ steps.az_login.outputs.clientId }}" `
+              -CertificateThumbprint "${{ steps.az_login.outputs.thumbprint }}" ` # Use thumbprint if using cert-based auth
+              -SubscriptionId "${{ env.AZURE_SUBSCRIPTION_ID }}" `
+              -ErrorAction Stop
+
+          # If using client secret based service principal, use this instead:
+          # Connect-AzAccount -ServicePrincipal `
+          #     -TenantId "${{ steps.az_login.outputs.tenantId }}" `
+          #     -ApplicationId "${{ steps.az_login.outputs.clientId }}" `
+          #     -ClientSecret "${{ secrets.AZURE_CLIENT_SECRET }}" ` # You'd need to pass client secret as a separate secret
+          #     -SubscriptionId "${{ env.AZURE_SUBSCRIPTION_ID }}" `
+          #     -ErrorAction Stop
+
           # The password from the previous step (retrieved from GitHub output)
           $pfxPassword = $env:PFX_PASSWORD_RAW | ConvertTo-SecureString -AsPlainText -Force
 
