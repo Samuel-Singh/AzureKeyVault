@@ -3,39 +3,47 @@ name: Deploy VM Key Vault Extension
 on:
   push:
     branches:
-      - main # Trigger on pushes to the main branch
+      - main
     paths:
-      - 'AzureKeyVault/bicep/**' # Only trigger if files in the bicep directory change
-  workflow_dispatch: # Allow manual triggering from GitHub UI
+      - 'AzureKeyVault/bicep/**'
+  workflow_dispatch:
 
 env:
-  # Define environment variables for common values
   RESOURCE_GROUP_NAME: Samuel_KeyVault_RG
   VM_NAME: SamuelKV
-  # Corrected paths to be relative to the repository root after checkout
   BICEP_FILE_PATH: bicep/vm-keyvault-extension.bicep
   PARAMETERS_FILE_PATH: bicep/vm-keyvault-extension.parameters.json
 
 jobs:
   deploy:
-    runs-on: ubuntu-latest # Use the latest Ubuntu runner
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v4 # Action to check out your repository code
+        uses: actions/checkout@v4
 
       - name: Azure Login
-        uses: azure/login@v2 # Action to log into Azure using a Service Principal
+        uses: azure/login@v2
         with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }} # GitHub Secret containing your Service Principal JSON
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      # --- NEW STEP: Install specific Azure CLI version ---
+      - name: Install Azure CLI
+        run: |
+          curl -sL https://aka.ms/InstallAzureCliDeb | sudo bash
+          sudo apt-get update
+          sudo apt-get install azure-cli=2.50.0 # <--- Try a specific stable version, e.g., 2.50.0 or 2.59.0 (latest as of June 2024 is 2.61.0, 2.62.0 soon)
+          az version # Verify the installed version
+        # You might need to adjust the version based on what's stable for you.
+        # Check Azure CLI release notes for recent stable versions.
+        # Alternatively, use 'pip install azure-cli==X.Y.Z' if you prefer Python's package manager.
 
       - name: Deploy VM Key Vault Extension
-        uses: azure/arm-deploy@v1 # <--- CHANGE THIS LINE FROM @v2 TO @v1
+        uses: azure/arm-deploy@v1 # Using @v1
         with:
-          # Get subscription ID from the secret, falling back to the creds JSON
           subscriptionId: ${{ secrets.AZURE_SUBSCRIPTION_ID || fromJson(secrets.AZURE_CREDENTIALS).subscriptionId }}
-          resourceGroupName: ${{ env.RESOURCE_GROUP_NAME }} # Use the environment variable
-          template: ${{ env.BICEP_FILE_PATH }} # Path to your Bicep file
-          parameters: ${{ env.PARAMETERS_FILE_PATH }} # Path to your parameter file
-          deploymentName: deploy-kv-ext-${{ github.run_id }} # Unique name for the deployment
-          failOnStdErr: false
+          resourceGroupName: ${{ env.RESOURCE_GROUP_NAME }}
+          template: ${{ env.BICEP_FILE_PATH }}
+          parameters: ${{ env.PARAMETERS_FILE_PATH }}
+          deploymentName: deploy-kv-ext-${{ github.run_id }}
+          failOnStdErr: false # Keep this to ignore non-critical stderr
