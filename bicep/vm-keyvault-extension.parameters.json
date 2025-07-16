@@ -9,7 +9,7 @@
       "value": "SamuelKV"
     },
     "location": {
-      "value": "southcentralus" // Changed to the correct Azure region name
+      "value": "southcentralus"
     },
     "observedCertificates": {
       "value": [
