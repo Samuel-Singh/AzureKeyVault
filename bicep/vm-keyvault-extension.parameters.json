@@ -21,7 +21,7 @@
           "certificateStoreLocation": "LocalMachine"
         },
         {
-          "url": "https://samuelkv.vault.azure.net/secrets/TestingIIScertificate/",
+          "url": "https://samuelkv.vault.azure.net/secrets/TestingIIScert/",
           "certificateStoreName": "MY",
           "certificateStoreLocation": "LocalMachine"
         }
