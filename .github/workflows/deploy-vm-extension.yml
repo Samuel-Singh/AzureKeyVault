@@ -5,7 +5,7 @@ on:
     branches:
       - main # Trigger on pushes to the main branch
     paths:
-      - 'AzureKeyVault/bicep/**' # Only trigger if files in the bicep directory change
+      - 'bicep/**' # Only trigger if files in the bicep directory change
   workflow_dispatch: # Allow manual triggering from GitHub UI
 
 env:
