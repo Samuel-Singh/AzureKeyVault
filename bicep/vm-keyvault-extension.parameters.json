@@ -15,11 +15,11 @@
           "certificateStoreName": "MY",
           "certificateStoreLocation": "LocalMachine"
         },
-#        {
-#          "url": "https://samuelkv.vault.azure.net/secrets/testing-selfsigned-cert/",
-#          "certificateStoreName": "MY",
-#          "certificateStoreLocation": "LocalMachine"
-#        },
+        {
+          "url": "https://samuelkv.vault.azure.net/secrets/testing-selfsigned-cert/",
+          "certificateStoreName": "MY",
+          "certificateStoreLocation": "LocalMachine"
+        },
         {
           "url": "https://samuelkv.vault.azure.net/secrets/TestingIIScertificate/",
           "certificateStoreName": "MY",
