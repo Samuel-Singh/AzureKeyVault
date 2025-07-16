@@ -1,0 +1,72 @@
+name: Scheduled Key Vault Certificate Renewal
+
+on:
+  workflow_dispatch: # Allow manual trigger
+  schedule:
+    - cron: '0 0 * * *' # Run once every day at midnight UTC
+
+env:
+  AZURE_SUBSCRIPTION_ID: "51f7ed01-84f6-44ab-aa72-4cfa4a75b9f1" # Set as a repository variable or secret
+  KEY_VAULT_NAME: "samuelkv"
+  CERTIFICATE_NAME: "TestingIIScertificate"
+  RENEWAL_THRESHOLD_DAYS: "27"
+
+jobs:
+  renew_cert:
+    runs-on: ubuntu-latest # or windows-latest if you prefer
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }} # Service Principal with Key Vault Contributor/Officer role
+          # Ensure this SPN has permissions to Get/Set certificates in your Key Vault
+
+      - name: Run PowerShell to Renew Certificate
+        shell: pwsh # Use PowerShell Core
+        run: |
+          # Define script content directly in the workflow
+          $SubscriptionId = "${{ env.AZURE_SUBSCRIPTION_ID }}"
+          $KeyVaultName = "${{ env.KEY_VAULT_NAME }}"
+          $CertificateName = "${{ env.CERTIFICATE_NAME }}"
+          $RenewalThresholdDays = ${{ env.RENEWAL_THRESHOLD_DAYS }}
+
+          # --- Azure Login (already done by azure/login action, but ensure context is set) ---
+          Set-AzContext -Subscription $SubscriptionId
+
+          # --- Get the current certificate from Key Vault ---
+          Write-Host "Retrieving certificate '$CertificateName' from Key Vault '$KeyVaultName'..."
+          try {
+              $cert = Get-AzKeyVaultCertificate -VaultName $KeyVaultName -Name $CertificateName -ErrorAction Stop
+              $currentExpiryDate = $cert.Expires
+              Write-Host "Current certificate '$CertificateName' expires on: $currentExpiryDate"
+          }
+          catch {
+              Write-Error "Failed to retrieve certificate '$CertificateName'. Error: $($_.Exception.Message)"
+              exit 1
+          }
+
+          # --- Calculate Days Remaining ---
+          $daysRemaining = ($currentExpiryDate - (Get-Date)).Days
+          Write-Host "Days remaining until expiration: $daysRemaining"
+
+          # --- Conditional Renewal ---
+          if ($daysRemaining -le $RenewalThresholdDays) {
+              Write-Host "Certificate '$CertificateName' is within the renewal threshold ($RenewalThresholdDays days)."
+              Write-Host "Creating a new version of the certificate in Key Vault..."
+
+              try {
+                  $newCert = Add-AzKeyVaultCertificate -VaultName $KeyVaultName -Name $CertificateName -Policy $cert.Policy -ErrorAction Stop
+                  Write-Host "Successfully created new version of certificate '$CertificateName'."
+                  Write-Host "New version expires on: $($newCert.Expires)"
+              }
+              catch {
+                  Write-Error "Failed to create new version of certificate '$CertificateName'. Error: $($_.Exception.Message)"
+                  exit 1
+              }
+          } else {
+              Write-Host "Certificate '$CertificateName' is not yet within the renewal threshold. No action taken."
+          }
