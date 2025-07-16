@@ -18,7 +18,7 @@ env:
 
 jobs:
   deploy:
-    runs-on: ubuntu-latest # Use the latest Ubuntu runner
+    runs-on: ubuntu-22.04 # Use the latest Ubuntu runner
 
     steps:
       - name: Checkout Repository
@@ -28,7 +28,10 @@ jobs:
         uses: azure/login@v2 # Action to log into Azure using a Service Principal
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }} # GitHub Secret containing your Service Principal JSON
-
+      
+      - name: Wait before deployment
+        run: sleep 10 # Wait for 10 seconds
+        
       - name: Deploy VM Key Vault Extension via Azure CLI
         run: |
           # Use Azure CLI directly to perform the deployment
