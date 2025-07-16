@@ -18,7 +18,7 @@ env:
 
 jobs:
   deploy:
-    runs-on: ubuntu-22.04 # Use the latest Ubuntu runner
+    runs-on: ubuntu-22.04 # Use a specific Ubuntu LTS runner for stability
 
     steps:
       - name: Checkout Repository
@@ -28,26 +28,16 @@ jobs:
         uses: azure/login@v2 # Action to log into Azure using a Service Principal
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }} # GitHub Secret containing your Service Principal JSON
-      
+
       - name: Wait before deployment
-        run: sleep 10 # Wait for 10 seconds
-        
-      - name: Compile Bicep
-        run: |
-          az bicep build --file ${{ env.BICEP_FILE_PATH }}
-          # This will output a JSON file (e.g., vm-keyvault-extension.json)
-          # in the same directory as your Bicep file.
-        shell: bash  
-        
-      - name: Deploy VM Key Vault Extension via Azure CLI
-        run: |
-          # Use Azure CLI directly to perform the deployment
-          az deployment group create \
-            --resource-group ${{ env.RESOURCE_GROUP_NAME }} \
-            --template-file ${{ env.BICEP_FILE_PATH }} \
-            --parameters ${{ env.PARAMETERS_FILE_PATH }} \
-            --name deploy-kv-ext-${{ github.run_id }} \
-            --subscription ${{ secrets.AZURE_SUBSCRIPTION_ID || fromJson(secrets.AZURE_CREDENTIALS).subscriptionId }} \
-            --debug # <--- CHANGE from --verbose to --debug
-            # No need for --fail-on-stderr here, as the 'run' step will fail on non-zero exit codes.
-        shell: bash # Explicitly define the shell for clarity and consistency
+        run: sleep 10 # Wait for 10 seconds (optional, but can help with transient issues)
+
+      - name: Deploy VM Key Vault Extension
+        uses: azure/arm-deploy@v2 # Using @v2 is generally preferred for the latest features/fixes
+        with:
+          subscriptionId: ${{ secrets.AZURE_SUBSCRIPTION_ID || fromJson(secrets.AZURE_CREDENTIALS).subscriptionId }}
+          resourceGroupName: ${{ env.RESOURCE_GROUP_NAME }}
+          template: ${{ env.BICEP_FILE_PATH }}
+          parameters: ${{ env.PARAMETERS_FILE_PATH }}
+          deploymentName: deploy-kv-ext-${{ github.run_id }}
+          failOnStdErr: false # Keep this to explicitly ignore non-critical stderr output
