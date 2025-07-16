@@ -11,12 +11,17 @@
     "observedCertificates": {
       "value": [
         {
-          "url": "https://samuelkv.vault.azure.net/secrets/allswellhome/619aa276bab74ab6b0f10fec910d6e62",
+          "url": "https://samuelkv.vault.azure.net/secrets/allswellhome/",
           "certificateStoreName": "MY",
           "certificateStoreLocation": "LocalMachine"
         },
         {
-          "url": "https://samuelkv.vault.azure.net/secrets/testing-selfsigned-cert/58fff60b608f48f7a4adc4713dc25163",
+          "url": "https://samuelkv.vault.azure.net/secrets/testing-selfsigned-cert/",
+          "certificateStoreName": "MY",
+          "certificateStoreLocation": "LocalMachine"
+        },
+        {
+          "url": "https://samuelkv.vault.azure.net/secrets/TestingIIScertificate/",
           "certificateStoreName": "MY",
           "certificateStoreLocation": "LocalMachine"
         }
