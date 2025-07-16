@@ -32,6 +32,13 @@ jobs:
       - name: Wait before deployment
         run: sleep 10 # Wait for 10 seconds
         
+      - name: Compile Bicep
+        run: |
+          az bicep build --file ${{ env.BICEP_FILE_PATH }}
+          # This will output a JSON file (e.g., vm-keyvault-extension.json)
+          # in the same directory as your Bicep file.
+        shell: bash  
+        
       - name: Deploy VM Key Vault Extension via Azure CLI
         run: |
           # Use Azure CLI directly to perform the deployment
