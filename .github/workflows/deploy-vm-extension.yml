@@ -41,6 +41,6 @@ jobs:
             --parameters ${{ env.PARAMETERS_FILE_PATH }} \
             --name deploy-kv-ext-${{ github.run_id }} \
             --subscription ${{ secrets.AZURE_SUBSCRIPTION_ID || fromJson(secrets.AZURE_CREDENTIALS).subscriptionId }} \
-            --verbose # Add --verbose for more detailed output in case of failure
+            --debug # <--- CHANGE from --verbose to --debug
             # No need for --fail-on-stderr here, as the 'run' step will fail on non-zero exit codes.
         shell: bash # Explicitly define the shell for clarity and consistency
