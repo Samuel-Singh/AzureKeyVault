@@ -13,7 +13,7 @@ env:
   RESOURCE_GROUP_NAME: Samuel_KeyVault_RG
   VM_NAME: SamuelKV
   # Corrected paths to be relative to the repository root after checkout
-  BICEP_FILE_PATH: bicep/vm-keyvault-extension.bicep
+  BICEP_FILE_PATH: AzureKeyVault/bicep/vm-keyvault-extension.bicep
   PARAMETERS_FILE_PATH: bicep/vm-keyvault-extension.parameters.json
 
 jobs:
@@ -29,16 +29,15 @@ jobs:
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }} # GitHub Secret containing your Service Principal JSON
 
-      # Removed the 'Install Azure CLI' step as it's already updated and provided by the runner.
-      # Its presence was causing the "E: Version '2.50.0' for 'azure-cli' was not found" error.
-
-      - name: Deploy VM Key Vault Extension
-        uses: azure/arm-deploy@v1 # Using @v1
-        with:
-          # Get subscription ID from the secret, falling back to the creds JSON
-          subscriptionId: ${{ secrets.AZURE_SUBSCRIPTION_ID || fromJson(secrets.AZURE_CREDENTIALS).subscriptionId }}
-          resourceGroupName: ${{ env.RESOURCE_GROUP_NAME }} # Use the environment variable
-          template: ${{ env.BICEP_FILE_PATH }} # Path to your Bicep file
-          parameters: ${{ env.PARAMETERS_FILE_PATH }} # Path to your parameter file
-          deploymentName: deploy-kv-ext-${{ github.run_id }} # Unique name for the deployment
-          failOnStdErr: false # Keep this to ignore non-critical stderr output
+      - name: Deploy VM Key Vault Extension via Azure CLI
+        run: |
+          # Use Azure CLI directly to perform the deployment
+          az deployment group create \
+            --resource-group ${{ env.RESOURCE_GROUP_NAME }} \
+            --template-file ${{ env.BICEP_FILE_PATH }} \
+            --parameters ${{ env.PARAMETERS_FILE_PATH }} \
+            --name deploy-kv-ext-${{ github.run_id }} \
+            --subscription ${{ secrets.AZURE_SUBSCRIPTION_ID || fromJson(secrets.AZURE_CREDENTIALS).subscriptionId }} \
+            --verbose # Add --verbose for more detailed output in case of failure
+            # No need for --fail-on-stderr here, as the 'run' step will fail on non-zero exit codes.
+        shell: bash # Explicitly define the shell for clarity and consistency
