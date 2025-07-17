@@ -1,31 +1,34 @@
-name: Generate Self-Signed PFX Certificate and Upload to Key Vault
+name: Scheduled Key Vault Certificate Renewal
 
 on:
-  workflow_dispatch: # Allows manual triggering from GitHub UI
+  workflow_dispatch: # Allows manual triggering
+  schedule:
+    - cron: '0 0 * * *' # Runs once every 24 hours at midnight UTC
 
 env:
-  # Define environment variables for your certificate details
-  CERT_FRIENDLY_NAME: "IIS-Key-Vault" # The friendly name for your certificate
-  CERT_COMMON_NAME: "IIS-Key-Vault"  # The Common Name (CN) / primary DNS name for the cert
-  CERT_VALIDITY_DAYS: "30"               # How long the certificate will be valid (in days)
-  KEY_VAULT_NAME: "samuelkv"           # Your Azure Key Vault name
-  CERTIFICATE_NAME_IN_KV: "IIS-Key-Vault" # Name of the certificate to store in Key Vault
+  # Define environment variables for your certificate and Key Vault details
+  CERT_FRIENDLY_NAME: "IIS-Key-Vault"           # The friendly name for your certificate
+  CERT_COMMON_NAME: "IIS-Key-Vault"            # The Common Name (CN) / primary DNS name for the cert
+  CERT_VALIDITY_DAYS: "30"                     # How long the newly generated certificate will be valid (in days)
+  RENEWAL_THRESHOLD_DAYS: "30"                 # Number of days before expiration to trigger renewal
+  KEY_VAULT_NAME: "samuelkv"                   # Your Azure Key Vault name
+  CERTIFICATE_NAME_IN_KV: "IIS-Key-Vault-Cert" # Name of the certificate in Key Vault
 
 jobs:
-  generate_and_upload_pfx:
-    runs-on: windows-latest # Use a Windows runner as New-SelfSignedCertificate is a Windows PowerShell cmdlet
+  renew_cert_if_needed:
+    runs-on: windows-latest # Use a Windows runner for PowerShell certificate cmdlets
 
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
       - name: Azure Login
-        uses: azure/login@v2 # Action to log into Azure using a Service Principal
+        uses: azure/login@v2
         with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }} # GitHub Secret containing your Service Principal JSON
-          enable-AzPSSession: true # Crucial for Az PowerShell session setup
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+          enable-AzPSSession: true
 
-      - name: Install Latest Az PowerShell Module (Ensures compatibility)
+      - name: Install Latest Az PowerShell Modules
         shell: pwsh
         run: |
           Set-PSRepository -Name PSGallery -InstallationPolicy Trusted -ErrorAction Stop
@@ -33,45 +36,85 @@ jobs:
           Import-Module Az -ErrorAction Stop
           Write-Host "Az modules updated and imported successfully."
 
-      - name: Generate Self-Signed Certificate and Export PFX
-        id: generate_cert_pfx # Assign an ID to this step to capture its outputs
+      - name: Check Certificate Expiration
+        id: check_expiry # Assign an ID to this step to access its outputs
         shell: pwsh
         env:
-          # Pass the full AZURE_CREDENTIALS secret string as an environment variable
           AZURE_CREDS_JSON: ${{ secrets.AZURE_CREDENTIALS }}
-          # Pass the client secret separately as a dedicated env var (more secure practice)
           SP_CLIENT_SECRET: ${{ fromJson(secrets.AZURE_CREDENTIALS).clientSecret }}
-          # The subscription ID from the credentials
           AZURE_SUBSCRIPTION_ID_FROM_CREDS: ${{ fromJson(secrets.AZURE_CREDENTIALS).subscriptionId }}
         run: |
-          # Define certificate properties from environment variables
-          $certFriendlyName = "${{ env.CERT_FRIENDLY_NAME }}"
-          $certCommonName = "${{ env.CERT_COMMON_NAME }}"
-          $validityDays = ${{ env.CERT_VALIDITY_DAYS }}
-
-          # Parse the AZURE_CREDENTIALS JSON to get SPN details for Connect-AzAccount
+          # --- Authenticate to Azure for Key Vault access ---
           $Creds = ConvertFrom-Json -InputObject $env:AZURE_CREDS_JSON
           $TenantId = $Creds.tenantId
           $ClientId = $Creds.clientId
-          # Using the subscription ID from the secret itself for consistency
-          $SubscriptionId = $env:AZURE_SUBSCRIPTION_ID_FROM_CREDS 
+          $SubscriptionId = $env:AZURE_SUBSCRIPTION_ID_FROM_CREDS
           $ClientSecret = $env:SP_CLIENT_SECRET
           
-          Write-Host "Attempting to connect with TenantId: $TenantId, ClientId: $ClientId, SubscriptionId: $SubscriptionId"
-
-          # Robust Authentication using Add-AzAccount with PSCredential
-          # This approach handles potential nuances with Connect-AzAccount -ServicePrincipal directly.
           $SecureClientSecret = ConvertTo-SecureString -String $ClientSecret -AsPlainText -Force
           $Credential = New-Object System.Management.Automation.PSCredential($ClientId, $SecureClientSecret)
           Add-AzAccount -Credential $Credential -ServicePrincipal -TenantId $TenantId -SubscriptionId $SubscriptionId -ErrorAction Stop
 
-          # Import Az.KeyVault module AFTER authentication
           Import-Module Az.KeyVault -ErrorAction Stop
           
-          Write-Host "Generating self-signed certificate with Friendly Name: '$certFriendlyName' and Common Name: '$certCommonName'..."
+          $KeyVaultName = "${{ env.KEY_VAULT_NAME }}"
+          $CertificateName = "${{ env.CERTIFICATE_NAME_IN_KV }}"
+          $RenewalThreshold = ${{ env.RENEWAL_THRESHOLD_DAYS }} # Get threshold from env
 
+          Write-Host "Retrieving certificate '$CertificateName' from Key Vault '$KeyVaultName'..."
+          try {
+              $cert = Get-AzKeyVaultCertificate -VaultName $KeyVaultName -Name $CertificateName -ErrorAction Stop
+              $currentExpiryDate = $cert.Expires
+              Write-Host "Current certificate '$CertificateName' expires on: $currentExpiryDate"
+          }
+          catch {
+              Write-Error "Failed to retrieve certificate '$CertificateName'. Error: $($_.Exception.Message)"
+              Write-Host "Assuming certificate does not exist or access denied. Setting daysRemaining to 0 to trigger creation/renewal."
+              echo "daysRemaining=0" >> $env:GITHUB_OUTPUT # Set to 0 to force creation if it doesn't exist or can't be retrieved
+              exit 0 # Exit successfully so the next step (conditional) can evaluate
+          }
+
+          $daysRemaining = ($currentExpiryDate - (Get-Date)).Days
+          Write-Host "Days remaining until expiration: $daysRemaining"
+          Write-Host "Renewal threshold: $RenewalThreshold days."
+
+          # Output days remaining for the next step's conditional
+          echo "daysRemaining=$daysRemaining" >> $env:GITHUB_OUTPUT
+          echo "renewalNeeded=$($daysRemaining -le $RenewalThreshold)" >> $env:GITHUB_OUTPUT # Output true/false
+
+      - name: Generate and Upload New PFX (Conditional)
+        id: generate_upload_pfx # Assign an ID to this step
+        shell: pwsh
+        # Only run this step if 'renewalNeeded' is true from the previous step
+        if: steps.check_expiry.outputs.renewalNeeded == 'true'
+        env:
+          AZURE_CREDS_JSON: ${{ secrets.AZURE_CREDENTIALS }}
+          SP_CLIENT_SECRET: ${{ fromJson(secrets.AZURE_CREDENTIALS).clientSecret }}
+          AZURE_SUBSCRIPTION_ID_FROM_CREDS: ${{ fromJson(secrets.AZURE_CREDENTIALS).subscriptionId }}
+        run: |
+          Write-Host "Certificate renewal needed. Proceeding to generate and upload new PFX."
+
+          # --- Authenticate to Azure for Key Vault access ---
+          $Creds = ConvertFrom-Json -InputObject $env:AZURE_CREDS_JSON
+          $TenantId = $Creds.tenantId
+          $ClientId = $Creds.clientId
+          $SubscriptionId = $env:AZURE_SUBSCRIPTION_ID_FROM_CREDS
+          $ClientSecret = $env:SP_CLIENT_SECRET
+          
+          $SecureClientSecret = ConvertTo-SecureString -String $ClientSecret -AsPlainText -Force
+          $Credential = New-Object System.Management.Automation.PSCredential($ClientId, $SecureClientSecret)
+          Add-AzAccount -Credential $Credential -ServicePrincipal -TenantId $TenantId -SubscriptionId $SubscriptionId -ErrorAction Stop
+
+          Import-Module Az.KeyVault -ErrorAction Stop
+
+          # --- Certificate Generation ---
+          $certFriendlyName = "${{ env.CERT_FRIENDLY_NAME }}"
+          $certCommonName = "${{ env.CERT_COMMON_NAME }}"
+          $validityDays = ${{ env.CERT_VALIDITY_DAYS }}
           $pfxPassword = ConvertTo-SecureString -String "${{ secrets.PFX_PASSWORD }}" -Force -AsPlainText
           
+          Write-Host "Generating new self-signed certificate with Friendly Name: '$certFriendlyName' and Common Name: '$certCommonName'..."
+
           $cert = New-SelfSignedCertificate `
               -DnsName $certCommonName `
               -CertStoreLocation "Cert:\CurrentUser\My" `
@@ -81,7 +124,7 @@ jobs:
               -TextExtension @("2.5.29.37={text}1.3.6.1.5.5.7.3.1,1.3.6.1.5.5.7.3.2", "2.5.29.19={text}CA=FALSE") `
               -ErrorAction Stop
 
-          Write-Host "Certificate generated successfully. Thumbprint: $($cert.Thumbprint)"
+          Write-Host "New certificate generated successfully. Thumbprint: $($cert.Thumbprint)"
 
           $pfxPath = "C:\temp\$($certFriendlyName).pfx"
           
@@ -93,53 +136,31 @@ jobs:
 
           Write-Host "PFX file exported to: $pfxPath"
           
-          # Output the PFX path and password so they can be used by subsequent steps
+          # Output the PFX path and password for the upload step
           echo "pfx_file_path=$pfxPath" >> $env:GITHUB_OUTPUT
-          echo "pfx_password_raw=${{ secrets.PFX_PASSWORD }}" >> $env:GITHUB_OUTPUT # Pass raw password for secure string conversion in next step
+          echo "pfx_password_raw=${{ secrets.PFX_PASSWORD }}" >> $env:GITHUB_OUTPUT
 
-      - name: Import PFX into Azure Key Vault
-        shell: pwsh
-        # Only run this step if the previous generation step was successful and produced a PFX file
-        if: success() && steps.generate_cert_pfx.outputs.pfx_file_path
-        env:
-          AZURE_CREDS_JSON: ${{ secrets.AZURE_CREDENTIALS }}
-          SP_CLIENT_SECRET: ${{ fromJson(secrets.AZURE_CREDENTIALS).clientSecret }}
-          AZURE_SUBSCRIPTION_ID_FROM_CREDS: ${{ fromJson(secrets.AZURE_CREDENTIALS).subscriptionId }}
-        run: |
-          # Parse the AZURE_CREDENTIALS JSON to get SPN details for Connect-AzAccount
-          $Creds = ConvertFrom-Json -InputObject $env:AZURE_CREDS_JSON
-          $TenantId = $Creds.tenantId
-          $ClientId = $Creds.clientId
-          $SubscriptionId = $env:AZURE_SUBSCRIPTION_ID_FROM_CREDS
-          $ClientSecret = $env:SP_CLIENT_SECRET
+          # --- Upload to Azure Key Vault ---
+          $KeyVaultName = "${{ env.KEY_VAULT_NAME }}"
+          $CertificateNameInKv = "${{ env.CERTIFICATE_NAME_IN_KV }}"
+          $pfxPasswordFromOutput = "${{ secrets.PFX_PASSWORD }}" | ConvertTo-SecureString -AsPlainText -Force # Use secret directly or previous output
           
-          # Robust Authentication using Add-AzAccount with PSCredential (re-authenticate for robustness)
-          $SecureClientSecret = ConvertTo-SecureString -String $ClientSecret -AsPlainText -Force
-          $Credential = New-Object System.Management.Automation.PSCredential($ClientId, $SecureClientSecret)
-          Add-AzAccount -Credential $Credential -ServicePrincipal -TenantId $TenantId -SubscriptionId $SubscriptionId -ErrorAction Stop
+          Write-Host "Importing PFX from '$pfxPath' into Key Vault '$KeyVaultName' as '$CertificateNameInKv'..."
 
-          # Import Az.KeyVault module AFTER authentication
-          Import-Module Az.KeyVault -ErrorAction Stop
-
-          # Retrieve the PFX password and path from the previous step's outputs
-          $pfxPassword = "${{ steps.generate_cert_pfx.outputs.pfx_password_raw }}" | ConvertTo-SecureString -AsPlainText -Force
-          $pfxFilePath = "${{ steps.generate_cert_pfx.outputs.pfx_file_path }}"
-
-          Write-Host "Importing PFX from '$pfxFilePath' into Key Vault '${{ env.KEY_VAULT_NAME }}'..."
-
-          # Import the PFX into Azure Key Vault
           Import-AzKeyVaultCertificate `
-              -VaultName "${{ env.KEY_VAULT_NAME }}" `
-              -Name "${{ env.CERTIFICATE_NAME_IN_KV }}" `
-              -FilePath $pfxFilePath `
-              -Password $pfxPassword `
+              -VaultName $KeyVaultName `
+              -Name $CertificateNameInKv `
+              -FilePath $pfxPath `
+              -Password $pfxPasswordFromOutput `
               -ErrorAction Stop
 
-          Write-Host "Certificate '${{ env.CERTIFICATE_NAME_IN_KV }}' (Friendly Name: '${{ env.CERT_FRIENDLY_NAME }}') imported into Key Vault '${{ env.KEY_VAULT_NAME }}' successfully!"
+          Write-Host "Certificate '$CertificateNameInKv' (Friendly Name: '$certFriendlyName') imported into Key Vault '$KeyVaultName' successfully!"
 
-      - name: Upload PFX as Artifact (Optional)
+      - name: Upload PFX as Artifact (Optional, only if generated/uploaded)
         uses: actions/upload-artifact@v4
+        # Only run if the 'generate_upload_pfx' step ran and produced an output path
+        if: success() && steps.generate_upload_pfx.outputs.pfx_file_path
         with:
           name: ${{ env.CERT_FRIENDLY_NAME }}-pfx
-          path: ${{ steps.generate_cert_pfx.outputs.pfx_file_path }} 
+          path: ${{ steps.generate_upload_pfx.outputs.pfx_file_path }} 
           retention-days: 1
