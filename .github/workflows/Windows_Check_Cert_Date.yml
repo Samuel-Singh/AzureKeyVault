@@ -6,7 +6,7 @@ on:
     - cron: '0 0 * * *' # Run once every day at midnight UTC
 
 env:
-  AZURE_SUBSCRIPTION_ID: "51f7ed01-84f6-44ab-aa72-4cfa4a75b9f1"
+  AZURE_SUBSCRIPTION_ID: "51f7ed01-84f6-44ab-aa72-4cfa4a75b9f1" # Global subscription ID, could be used for verification
   KEY_VAULT_NAME: "samuelkv"
   CERTIFICATE_NAME_IN_KV: "TestingIIScertificate" # Name of the certificate in Key Vault
   CERT_FRIENDLY_NAME: "TestingIIScertificate"     # The Friendly Name you want for the certificate
@@ -23,31 +23,39 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Azure Login
-        id: az_login # Keep ID to reference its outputs
+        # We still run this to establish the Azure context for the runner and install modules
         uses: azure/login@v2
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
-          enable-AzPSSession: true # Crucial for Az PowerShell session setup
+          enable-AzPSSession: true # Still recommended for overall Az module setup
 
       - name: Get Current Certificate Expiration
         id: get_cert_expiry # Assign an ID to this step to get its outputs
         shell: pwsh
-        env: # Pass outputs and secrets directly as environment variables for this step
-          TENANT_ID: ${{ steps.az_login.outputs.tenantId }}
-          CLIENT_ID: ${{ steps.az_login.outputs.clientId }}
-          SUBSCRIPTION_ID_SP: ${{ steps.az_login.outputs.subscriptionId }} # Differentiate from global env var
-          SP_CLIENT_SECRET: ${{ secrets.AZURE_SP_CLIENT_SECRET }} # The dedicated client secret
+        env:
+          # Pass the full AZURE_CREDENTIALS secret string as an environment variable
+          AZURE_CREDS_JSON: ${{ secrets.AZURE_CREDENTIALS }}
+          # Pass the dedicated client secret separately for security
+          SP_CLIENT_SECRET: ${{ secrets.AZURE_SP_CLIENT_SECRET }} 
         run: |
           # --- Explicitly import Az.KeyVault module ---
           Import-Module Az.KeyVault -ErrorAction Stop
 
-          # --- Explicitly connect Az PowerShell using environment variables ---
-          # These are passed to the 'env' block of this specific step.
+          # --- Parse the AZURE_CREDENTIALS JSON to get SPN details ---
+          $Creds = ConvertFrom-Json -InputObject $env:AZURE_CREDS_JSON
+          $TenantId = $Creds.tenantId
+          $ClientId = $Creds.clientId
+          $SubscriptionId = $Creds.subscriptionId
+          $ClientSecret = $env:SP_CLIENT_SECRET # Get the client secret from its dedicated env var
+
+          Write-Host "Attempting to connect with TenantId: $TenantId, ClientId: $ClientId, SubscriptionId: $SubscriptionId"
+
+          # --- Explicitly connect Az PowerShell using parsed variables ---
           Connect-AzAccount -ServicePrincipal `
-              -TenantId "$env:TENANT_ID" `
-              -ApplicationId "$env:CLIENT_ID" `
-              -ClientSecret "$env:SP_CLIENT_SECRET" ` # Access the secret via $env
-              -SubscriptionId "$env:SUBSCRIPTION_ID_SP" `
+              -TenantId $TenantId `
+              -ApplicationId $ClientId `
+              -ClientSecret $ClientSecret `
+              -SubscriptionId $SubscriptionId `
               -ErrorAction Stop
           
           $KeyVaultName = "${{ env.KEY_VAULT_NAME }}"
@@ -73,18 +81,23 @@ jobs:
         id: generate_pfx # Assign an ID for its output
         shell: pwsh
         if: steps.get_cert_expiry.outputs.daysRemaining <= env.RENEWAL_THRESHOLD_DAYS
-        env: # Pass outputs and secrets directly as environment variables for this step
-          TENANT_ID: ${{ steps.az_login.outputs.tenantId }}
-          CLIENT_ID: ${{ steps.az_login.outputs.clientId }}
-          SUBSCRIPTION_ID_SP: ${{ steps.az_login.outputs.subscriptionId }}
-          SP_CLIENT_SECRET: ${{ secrets.AZURE_SP_CLIENT_SECRET }}
+        env:
+          AZURE_CREDS_JSON: ${{ secrets.AZURE_CREDENTIALS }}
+          SP_CLIENT_SECRET: ${{ secrets.AZURE_SP_CLIENT_SECRET }} 
         run: |
+          # --- Parse the AZURE_CREDENTIALS JSON to get SPN details ---
+          $Creds = ConvertFrom-Json -InputObject $env:AZURE_CREDS_JSON
+          $TenantId = $Creds.tenantId
+          $ClientId = $Creds.clientId
+          $SubscriptionId = $Creds.subscriptionId
+          $ClientSecret = $env:SP_CLIENT_SECRET # Get the client secret from its dedicated env var
+
           # --- Reconnect Az PowerShell in this step for robustness ---
           Connect-AzAccount -ServicePrincipal `
-              -TenantId "$env:TENANT_ID" `
-              -ApplicationId "$env:CLIENT_ID" `
-              -ClientSecret "$env:SP_CLIENT_SECRET" `
-              -SubscriptionId "$env:SUBSCRIPTION_ID_SP" `
+              -TenantId $TenantId `
+              -ApplicationId $ClientId `
+              -ClientSecret $ClientSecret `
+              -SubscriptionId $SubscriptionId `
               -ErrorAction Stop
 
           $certFriendlyName = "${{ env.CERT_FRIENDLY_NAME }}"
@@ -111,18 +124,23 @@ jobs:
       - name: Import PFX into Azure Key Vault
         shell: pwsh
         if: success() && steps.generate_pfx.outputs.PFX_PATH
-        env: # Pass outputs and secrets directly as environment variables for this step
-          TENANT_ID: ${{ steps.az_login.outputs.tenantId }}
-          CLIENT_ID: ${{ steps.az_login.outputs.clientId }}
-          SUBSCRIPTION_ID_SP: ${{ steps.az_login.outputs.subscriptionId }}
-          SP_CLIENT_SECRET: ${{ secrets.AZURE_SP_CLIENT_SECRET }}
+        env:
+          AZURE_CREDS_JSON: ${{ secrets.AZURE_CREDENTIALS }}
+          SP_CLIENT_SECRET: ${{ secrets.AZURE_SP_CLIENT_SECRET }} 
         run: |
+          # --- Parse the AZURE_CREDENTIALS JSON to get SPN details ---
+          $Creds = ConvertFrom-Json -InputObject $env:AZURE_CREDS_JSON
+          $TenantId = $Creds.tenantId
+          $ClientId = $Creds.clientId
+          $SubscriptionId = $Creds.subscriptionId
+          $ClientSecret = $env:SP_CLIENT_SECRET # Get the client secret from its dedicated env var
+
           # --- Reconnect Az PowerShell in this step for robustness ---
           Connect-AzAccount -ServicePrincipal `
-              -TenantId "$env:TENANT_ID" `
-              -ApplicationId "$env:CLIENT_ID" `
-              -ClientSecret "$env:SP_CLIENT_SECRET" `
-              -SubscriptionId "$env:SUBSCRIPTION_ID_SP" `
+              -TenantId $TenantId `
+              -ApplicationId $ClientId `
+              -ClientSecret $ClientSecret `
+              -SubscriptionId $SubscriptionId `
               -ErrorAction Stop
 
           $pfxPassword = $env:PFX_PASSWORD_RAW | ConvertTo-SecureString -AsPlainText -Force
