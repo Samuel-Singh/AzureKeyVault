@@ -27,23 +27,27 @@ jobs:
         uses: azure/login@v2
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
-          enable-AzPSSession: true # Still good to keep, helps with overall Az module loading
+          enable-AzPSSession: true # Crucial for Az PowerShell session setup
 
       - name: Get Current Certificate Expiration
         id: get_cert_expiry # Assign an ID to this step to get its outputs
         shell: pwsh
         run: |
+          # Pass outputs as PowerShell variables
+          $TenantId = "${{ steps.az_login.outputs.tenantId }}"
+          $ClientId = "${{ steps.az_login.outputs.clientId }}"
+          $SubscriptionId = "${{ steps.az_login.outputs.subscriptionId }}"
+          $ClientSecret = "${{ secrets.AZURE_SP_CLIENT_SECRET }}" # Direct reference to secret
+
           # --- Explicitly import Az.KeyVault module ---
           Import-Module Az.KeyVault -ErrorAction Stop
 
-          # --- Explicitly connect Az PowerShell using direct outputs from azure/login step ---
-          # This is the most reliable way to ensure PowerShell is authenticated.
-          # Assumes AZURE_CREDENTIALS is a service principal with a client secret.
+          # --- Explicitly connect Az PowerShell using passed variables ---
           Connect-AzAccount -ServicePrincipal `
-              -TenantId "${{ steps.az_login.outputs.tenantId }}" `
-              -ApplicationId "${{ steps.az_login.outputs.clientId }}" `
-              -ClientSecret "${{ secrets.AZURE_SP_CLIENT_SECRET }}" ` # Use the dedicated secret for the client secret
-              -SubscriptionId "${{ steps.az_login.outputs.subscriptionId }}" ` # Use output for subscriptionId as well
+              -TenantId $TenantId `
+              -ApplicationId $ClientId `
+              -ClientSecret $ClientSecret `
+              -SubscriptionId $SubscriptionId `
               -ErrorAction Stop
           
           $KeyVaultName = "${{ env.KEY_VAULT_NAME }}"
@@ -57,37 +61,37 @@ jobs:
           }
           catch {
               Write-Error "Failed to retrieve certificate '$CertificateName'. Error: $($_.Exception.Message)"
-              # If cert not found (e.g., first run or deleted), treat as needing renewal
               echo "daysRemaining=0" >> $env:GITHUB_OUTPUT
-              exit 0 # Exit with 0 to allow subsequent steps to evaluate the output
+              exit 0
           }
 
-          # Calculate Days Remaining
           $daysRemaining = ($currentExpiryDate - (Get-Date)).Days
           Write-Host "Days remaining until expiration: $daysRemaining"
-
-          # Output days remaining for subsequent steps to use in their 'if' conditions
           echo "daysRemaining=$daysRemaining" >> $env:GITHUB_OUTPUT
 
       - name: Generate Self-Signed Certificate and Export PFX
         id: generate_pfx # Assign an ID for its output
         shell: pwsh
-        # This step only runs if the certificate is within the renewal threshold
         if: steps.get_cert_expiry.outputs.daysRemaining <= env.RENEWAL_THRESHOLD_DAYS
         run: |
+          # Pass outputs as PowerShell variables
+          $TenantId = "${{ steps.az_login.outputs.tenantId }}"
+          $ClientId = "${{ steps.az_login.outputs.clientId }}"
+          $SubscriptionId = "${{ steps.az_login.outputs.subscriptionId }}"
+          $ClientSecret = "${{ secrets.AZURE_SP_CLIENT_SECRET }}" # Direct reference to secret
+
           # --- Reconnect Az PowerShell in this step for robustness ---
           Connect-AzAccount -ServicePrincipal `
-              -TenantId "${{ steps.az_login.outputs.tenantId }}" `
-              -ApplicationId "${{ steps.az_login.outputs.clientId }}" `
-              -ClientSecret "${{ secrets.AZURE_SP_CLIENT_SECRET }}" ` # Use the dedicated secret
-              -SubscriptionId "${{ steps.az_login.outputs.subscriptionId }}" ` # Use output for subscriptionId as well
+              -TenantId $TenantId `
+              -ApplicationId $ClientId `
+              -ClientSecret $ClientSecret `
+              -SubscriptionId $SubscriptionId `
               -ErrorAction Stop
 
           $certFriendlyName = "${{ env.CERT_FRIENDLY_NAME }}"
           $certCommonName = "${{ env.CERT_COMMON_NAME }}"
           $validityDays = ${{ env.CERT_VALIDITY_DAYS }}
 
-          # CRITICAL: Use a GitHub Secret for the PFX password in production
           $pfxPassword = ConvertTo-SecureString -String "${{ secrets.PFX_PASSWORD }}" -Force -AsPlainText
           
           $cert = New-SelfSignedCertificate `
@@ -102,30 +106,29 @@ jobs:
           Export-PfxCertificate -Cert $cert -FilePath $pfxPath -Password $pfxPassword
 
           Write-Host "Self-signed certificate '$certFriendlyName' generated and exported to $pfxPath"
-
-          # Output PFX path and password for the next step
           echo "PFX_PATH=$pfxPath" >> $env:GITHUB_OUTPUT
-          # IMPORTANT: For actual production, consider NOT outputting PFX_PASSWORD_RAW,
-          # and re-referencing ${{ secrets.PFX_PASSWORD }} in the next step instead.
           echo "PFX_PASSWORD_RAW=${{ secrets.PFX_PASSWORD }}" >> $env:GITHUB_OUTPUT
 
       - name: Import PFX into Azure Key Vault
         shell: pwsh
-        # This step only runs if the certificate generation step ran successfully
-        if: success() && steps.generate_pfx.outputs.PFX_PATH # Ensure this step runs only if the PFX was generated
+        if: success() && steps.generate_pfx.outputs.PFX_PATH
         run: |
+          # Pass outputs as PowerShell variables
+          $TenantId = "${{ steps.az_login.outputs.tenantId }}"
+          $ClientId = "${{ steps.az_login.outputs.clientId }}"
+          $SubscriptionId = "${{ steps.az_login.outputs.subscriptionId }}"
+          $ClientSecret = "${{ secrets.AZURE_SP_CLIENT_SECRET }}" # Direct reference to secret
+
           # --- Reconnect Az PowerShell in this step for robustness ---
           Connect-AzAccount -ServicePrincipal `
-              -TenantId "${{ steps.az_login.outputs.tenantId }}" `
-              -ApplicationId "${{ steps.az_login.outputs.clientId }}" `
-              -ClientSecret "${{ secrets.AZURE_SP_CLIENT_SECRET }}" ` # Use the dedicated secret
-              -SubscriptionId "${{ steps.az_login.outputs.subscriptionId }}" ` # Use output for subscriptionId as well
+              -TenantId $TenantId `
+              -ApplicationId $ClientId `
+              -ClientSecret $ClientSecret `
+              -SubscriptionId $SubscriptionId `
               -ErrorAction Stop
 
-          # The password from the previous step (retrieved from GitHub output)
           $pfxPassword = $env:PFX_PASSWORD_RAW | ConvertTo-SecureString -AsPlainText -Force
 
-          # Import the PFX into Azure Key Vault
           Import-AzKeyVaultCertificate `
               -VaultName "${{ env.KEY_VAULT_NAME }}" `
               -Name "${{ env.CERTIFICATE_NAME_IN_KV }}" `
