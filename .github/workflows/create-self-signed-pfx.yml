@@ -1,0 +1,74 @@
+name: Generate Self-Signed PFX Certificate
+
+on:
+  workflow_dispatch: # Allows manual triggering from GitHub UI
+
+env:
+  # Define environment variables for your certificate details
+  CERT_FRIENDLY_NAME: "IIS-Key-Vault" # The friendly name for your certificate
+  CERT_COMMON_NAME: "IIS-Key-Vault"  # The Common Name (CN) / primary DNS name for the cert
+  CERT_VALIDITY_DAYS: "30"               # How long the certificate will be valid (in days)
+
+jobs:
+  generate_pfx:
+    runs-on: windows-latest # Use a Windows runner as New-SelfSignedCertificate is a Windows PowerShell cmdlet
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4 # Action to check out your repository code (optional for this specific task, but good practice)
+
+      - name: Generate Self-Signed Certificate and Export PFX
+        shell: pwsh # Use PowerShell Core
+        run: |
+          # Define certificate properties from environment variables
+          $certFriendlyName = "${{ env.CERT_FRIENDLY_NAME }}"
+          $certCommonName = "${{ env.CERT_COMMON_NAME }}"
+          $validityDays = ${{ env.CERT_VALIDITY_DAYS }}
+
+          # CRITICAL: Define a secure password for the PFX file.
+          # This should be stored as a GitHub Secret (e.g., PFX_EXPORT_PASSWORD)
+          # and never hardcoded in your workflow file.
+          # Replace 'secrets.PFX_EXPORT_PASSWORD' with your actual secret name.
+          $pfxPassword = ConvertTo-SecureString -String "${{ secrets.PFX_PASSWORD }}" -Force -AsPlainText
+          
+          Write-Host "Generating self-signed certificate with Friendly Name: '$certFriendlyName' and Common Name: '$certCommonName'..."
+
+          # Create the self-signed certificate
+          # -CertStoreLocation "Cert:\CurrentUser\My": Stores the cert in the current user's personal store on the runner.
+          # -KeyUsage DigitalSignature, KeyEncipherment: Standard usages for SSL/TLS certificates.
+          # -TextExtension: Adds Server Authentication and Client Authentication EKU (Enhanced Key Usage).
+          $cert = New-SelfSignedCertificate `
+              -DnsName $certCommonName `
+              -CertStoreLocation "Cert:\CurrentUser\My" `
+              -FriendlyName $certFriendlyName `
+              -NotAfter (Get-Date).AddDays($validityDays) `
+              -KeyUsage DigitalSignature, KeyEncipherment `
+              -TextExtension @("2.5.29.37={text}1.3.6.1.5.5.7.3.1,1.3.6.1.5.5.7.3.2", "2.5.29.19={text}CA=FALSE") `
+              -ErrorAction Stop # Stop the script if certificate creation fails
+
+          Write-Host "Certificate generated successfully. Thumbprint: $($cert.Thumbprint)"
+
+          # Define the path where the PFX file will be exported on the runner
+          # This file will be temporary and deleted after the job unless uploaded as an artifact.
+          $pfxPath = "C:\temp\$($certFriendlyName).pfx"
+          
+          # Ensure the directory exists
+          if (-not (Test-Path -Path (Split-Path $pfxPath) -PathType Container)) {
+              New-Item -Path (Split-Path $pfxPath) -ItemType Directory -Force
+          }
+
+          # Export the certificate with its private key to a PFX file
+          Export-PfxCertificate -Cert $cert -FilePath $pfxPath -Password $pfxPassword -ErrorAction Stop
+
+          Write-Host "PFX file exported to: $pfxPath"
+          Write-Host "Certificate creation and export process complete. The .pfx file is located on the runner."
+          Write-Host "It will be discarded when the job finishes, as per your request."
+
+          # Optional: If you wanted to inspect the file or make it available for download,
+          # you would add an 'upload-artifact' step here.
+            - name: Upload PFX as Artifact (Optional)
+              uses: actions/upload-artifact@v4
+              with:
+                name: ${{ env.CERT_FRIENDLY_NAME }}-pfx
+                path: ${{ $pfxPath }}
+                retention-days: 1 # How long to keep the artifact
