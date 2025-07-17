@@ -1,14 +1,16 @@
 // Define parameters for your deployment
-// REMOVED: param resourceGroupName string // The resource group where your VM exists
-param vmName string            // The name of your existing VM
-param location string          // The location of your existing VM
+param vmName string        // The name of your existing VM
+param location string      // The location of your existing VM
+param resourceGroupName string // The resource group where your VM exists
 
 // This is the core parameter that will hold your list of certificates
 param observedCertificates array = []
 
 // --- Existing VM Resource Reference ---
+// Reference the VM in the specified resource group
 resource vm 'Microsoft.Compute/virtualMachines@2024-11-01' existing = {
   name: vmName
+  scope: resourceGroup(resourceGroupName) // Specify the scope to the correct resource group
 }
 
 // --- Key Vault VM Extension Resource Definition ---
