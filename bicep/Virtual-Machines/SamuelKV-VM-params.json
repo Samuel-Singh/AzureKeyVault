@@ -26,7 +26,7 @@
       ]
     },
     "iisScriptFileUri": {
-      "value": "https://raw.githubusercontent.com/Samuel-Singh/AzureKeyVault/refs/heads/main/scripts/scripts/update-iis-bindings.ps1"
+      "value": "https://raw.githubusercontent.com/Samuel-Singh/AzureKeyVault/refs/heads/main/scripts/update-iis-bindings.ps1"
     }
   }
 }
