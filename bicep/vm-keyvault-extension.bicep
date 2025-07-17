@@ -9,6 +9,9 @@ param observedCertificates array = []
 // PARAMETER for Custom Script Extension
 param iisScriptFileUri string // URI to the PowerShell script (e.g., raw GitHub URL or Blob Storage SAS URL)
 
+// NEW PARAMETER: To force Custom Script Extension re-execution
+param forceIisScriptUpdateTag string = newGuid() // Use newGuid() as a default value here
+
 // --- Existing VM Resource Reference ---
 resource vm 'Microsoft.Compute/virtualMachines@2024-11-01' existing = {
   name: vmName
@@ -57,17 +60,14 @@ resource iisBindingScriptExtension 'Microsoft.Compute/virtualMachines/extensions
     type: 'CustomScriptExtension'
     typeHandlerVersion: '1.9' // For Windows VMs, typically 1.9 or later
     autoUpgradeMinorVersion: true
-    // ADD THIS LINE TO FORCE REDEPLOYMENT/REDOWNLOAD
-    // Change this value every time you update the script and want it re-downloaded
-    // forceUpdateTag: '202507172345' // Example: current date/time in YYYYMMDDHHMM format, update this for each run
-    // You could also use a newGuid() function if you want it to change automatically:
-    forceUpdateTag: '${newGuid()}' // This will always force a re-run/re-download
+    
+    // Use the new parameter here
+    forceUpdateTag: forceIisScriptUpdateTag // Now references the parameter
 
     settings: {
       fileUris: [
         iisScriptFileUri
       ]
-      // No parameters are passed to the PowerShell script now, as it's self-sufficient
       commandToExecute: 'powershell.exe -ExecutionPolicy Unrestricted -File ${last(split(iisScriptFileUri, '/'))}'
     }
   }
