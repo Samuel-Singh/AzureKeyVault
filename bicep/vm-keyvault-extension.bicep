@@ -47,18 +47,17 @@ resource iisBindingScriptExtension 'Microsoft.Compute/virtualMachines/extensions
   parent: vm
   location: location
   
+  // CORRECT PLACEMENT for dependsOn: Direct under the resource, not inside 'properties'
+  dependsOn: [
+    keyVaultExtension
+  ]
+
   properties: {
     publisher: 'Microsoft.Compute'
     type: 'CustomScriptExtension'
     typeHandlerVersion: '1.9' // For Windows VMs, typically 1.9 or later
     autoUpgradeMinorVersion: true
     
-    // Ensure this runs AFTER the Key Vault extension has been configured.
-    // The KV extension downloads certificates asynchronously, so the PS script should be robust.
-    dependsOn: [
-      keyVaultExtension
-    ]
-
     settings: {
       fileUris: [
         iisScriptFileUri
