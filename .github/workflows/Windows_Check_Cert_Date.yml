@@ -6,7 +6,7 @@ on:
     - cron: '0 0 * * *' # Run once every day at midnight UTC
 
 env:
-  AZURE_SUBSCRIPTION_ID: "51f7ed01-84f6-44ab-aa72-4cfa4a75b9f1" # Global subscription ID
+  AZURE_SUBSCRIPTION_ID: "51f7ed01-84f6-44ab-aa72-4cfa4a75b9f1"
   KEY_VAULT_NAME: "samuelkv"
   CERTIFICATE_NAME_IN_KV: "TestingIIScertificate" # Name of the certificate in Key Vault
   CERT_FRIENDLY_NAME: "TestingIIScertificate"     # The Friendly Name you want for the certificate
@@ -23,16 +23,13 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Azure Login
-        # This action is responsible for logging in and setting up the Az PowerShell session.
-        # We rely on its internal setup for subsequent Az cmdlets.
+        id: az_login # Keep ID to reference its outputs
         uses: azure/login@v2
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
-          enable-AzPSSession: true # This explicitly tells it to set up the PowerShell session
+          enable-AzPSSession: true # Crucial for Az PowerShell session setup
 
       - name: Install Latest Az PowerShell Module (Optional, but good for consistency)
-        # This step helps ensure all Az modules are up-to-date,
-        # but the core authentication should be handled by azure/login.
         shell: pwsh
         run: |
           Set-PSRepository -Name PSGallery -InstallationPolicy Trusted -ErrorAction Stop
@@ -43,20 +40,32 @@ jobs:
       - name: Get Current Certificate Expiration
         id: get_cert_expiry # Assign an ID to this step to get its outputs
         shell: pwsh
+        env:
+          AZURE_CREDS_JSON: ${{ secrets.AZURE_CREDENTIALS }}
+          SP_CLIENT_SECRET: ${{ secrets.AZURE_SP_CLIENT_SECRET }} 
         run: |
-          # --- Explicitly import Az.KeyVault module ---
-          # This is necessary to make Get-AzKeyVaultCertificate available.
           Import-Module Az.KeyVault -ErrorAction Stop
 
-          # We are now relying solely on the 'azure/login' action to have established the session.
-          # Removed: Connect-AzAccount -ServicePrincipal ...
+          $Creds = ConvertFrom-Json -InputObject $env:AZURE_CREDS_JSON
+          $TenantId = $Creds.tenantId
+          $ClientId = $Creds.clientId
+          $SubscriptionId = $Creds.subscriptionId
+          $ClientSecret = $env:SP_CLIENT_SECRET
 
+          Write-Host "Attempting to connect with TenantId: $TenantId, ClientId: $ClientId, SubscriptionId: $SubscriptionId"
+
+          Connect-AzAccount -ServicePrincipal `
+              -TenantId $TenantId `
+              -ApplicationId $ClientId `
+              -ClientSecret $ClientSecret `
+              -SubscriptionId $SubscriptionId `
+              -ErrorAction Stop
+          
           $KeyVaultName = "${{ env.KEY_VAULT_NAME }}"
           $CertificateName = "${{ env.CERTIFICATE_NAME_IN_KV }}"
           
           Write-Host "Retrieving certificate '$CertificateName' from Key Vault '$KeyVaultName'..."
           try {
-              # This cmdlet should now work because azure/login set up the session
               $cert = Get-AzKeyVaultCertificate -VaultName $KeyVaultName -Name $CertificateName -ErrorAction Stop
               $currentExpiryDate = $cert.Expires
               Write-Host "Current certificate '$CertificateName' expires on: $currentExpiryDate"
@@ -75,12 +84,22 @@ jobs:
         id: generate_pfx # Assign an ID for its output
         shell: pwsh
         if: steps.get_cert_expiry.outputs.daysRemaining <= env.RENEWAL_THRESHOLD_DAYS
+        env:
+          AZURE_CREDS_JSON: ${{ secrets.AZURE_CREDENTIALS }}
+          SP_CLIENT_SECRET: ${{ secrets.AZURE_SP_CLIENT_SECRET }} 
         run: |
-          # --- Explicitly import Az.KeyVault module ---
-          Import-Module Az.KeyVault -ErrorAction Stop
+          $Creds = ConvertFrom-Json -InputObject $env:AZURE_CREDS_JSON
+          $TenantId = $Creds.tenantId
+          $ClientId = $Creds.clientId
+          $SubscriptionId = $Creds.subscriptionId
+          $ClientSecret = $env:SP_CLIENT_SECRET
 
-          # Relying on 'azure/login' for authentication.
-          # Removed: Connect-AzAccount -ServicePrincipal ...
+          Connect-AzAccount -ServicePrincipal `
+              -TenantId $TenantId `
+              -ApplicationId $ClientId `
+              -ClientSecret $ClientSecret `
+              -SubscriptionId $SubscriptionId `
+              -ErrorAction Stop
 
           $certFriendlyName = "${{ env.CERT_FRIENDLY_NAME }}"
           $certCommonName = "${{ env.CERT_COMMON_NAME }}"
@@ -101,19 +120,31 @@ jobs:
 
           Write-Host "Self-signed certificate '$certFriendlyName' generated and exported to $pfxPath"
           echo "PFX_PATH=$pfxPath" >> $env:GITHUB_OUTPUT
+          # CORRECTED: This line correctly outputs the PFX password to the step's outputs
           echo "PFX_PASSWORD_RAW=${{ secrets.PFX_PASSWORD }}" >> $env:GITHUB_OUTPUT
 
       - name: Import PFX into Azure Key Vault
         shell: pwsh
         if: success() && steps.generate_pfx.outputs.PFX_PATH
+        env:
+          AZURE_CREDS_JSON: ${{ secrets.AZURE_CREDENTIALS }}
+          SP_CLIENT_SECRET: ${{ secrets.AZURE_SP_CLIENT_SECRET }} 
         run: |
-          # --- Explicitly import Az.KeyVault module ---
-          Import-Module Az.KeyVault -ErrorAction Stop
+          $Creds = ConvertFrom-Json -InputObject $env:AZURE_CREDS_JSON
+          $TenantId = $Creds.tenantId
+          $ClientId = $Creds.clientId
+          $SubscriptionId = $Creds.subscriptionId
+          $ClientSecret = $env:SP_CLIENT_SECRET
 
-          # Relying on 'azure/login' for authentication.
-          # Removed: Connect-AzAccount -ServicePrincipal ...
+          Connect-AzAccount -ServicePrincipal `
+              -TenantId $TenantId `
+              -ApplicationId $ClientId `
+              -ClientSecret $ClientSecret `
+              -SubscriptionId $SubscriptionId `
+              -ErrorAction Stop
 
-          $pfxPassword = $env:PFX_PASSWORD_RAW | ConvertTo-SecureString -AsPlainText -Force
+          # CORRECTED: Access the PFX password from the *previous step's outputs*
+          $pfxPassword = "${{ steps.generate_pfx.outputs.PFX_PASSWORD_RAW }}" | ConvertTo-SecureString -AsPlainText -Force
 
           Import-AzKeyVaultCertificate `
               -VaultName "${{ env.KEY_VAULT_NAME }}" `
