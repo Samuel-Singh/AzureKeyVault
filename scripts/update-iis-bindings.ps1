@@ -75,6 +75,9 @@ foreach ($site in $iisWebsites) {
     foreach ($binding in $httpsBindingsFound) {
         $hostHeader = $binding.HostHeader.ToLowerInvariant() # Normalize host header
         
+        # Log the raw binding information for debugging
+        Write-Log "  Found existing HTTPS binding. BindingInformation: '$($binding.BindingInformation)', HostHeader: '$hostHeader', Port: '$($binding.Port)', SSLFlags: '$($binding.SslFlags)'"
+
         if ($hostHeadersProcessed.ContainsKey($hostHeader)) {
             Write-Log "  Skipping already processed host header: $hostHeader for site '$($site.Name)'" "INFO"
             continue
@@ -84,27 +87,28 @@ foreach ($site in $iisWebsites) {
         Write-Log "  Checking binding for host: '$hostHeader' (empty means IP-based) on port: $($binding.Port)"
 
         # Find the latest valid certificate for this binding.
-        # Logic is adjusted for empty host headers.
         $latestCert = $null
         try {
             $certsInStore = Get-ChildItem -Path $certStorePath | Where-Object { $_.NotAfter -gt (Get-Date) } | Sort-Object -Property NotAfter -Descending
 
             if ([string]::IsNullOrEmpty($hostHeader)) {
-                # For IP-based bindings (no host header), try to find a certificate
-                # that matches the website's name as a CN, or a general purpose certificate.
-                # You might need to refine this to match a specific "default" certificate if you have one.
-                Write-Log "    Binding has no host header (IP-based). Attempting to find a certificate matching site name or a general purpose cert." "INFO"
-                $latestCert = $certsInStore | Where-Object {
-                    ($_.Subject -like "*CN=$($site.Name)*") -or # Match site name (e.g., Default Web Site -> CN=Default Web Site)
-                    ($_.Subject -like "*CN=IIS-Key-Vault*") -or # Specific to your scenario: find cert containing "IIS-Key-Vault"
-                    ($_.DnsNames -contains $site.Name) # Match SAN for site name
+                # For IP-based bindings (no host header), prioritize by FriendlyName which often comes from Key Vault secret name
+                Write-Log "    Binding has no host header (IP-based). Attempting to find certificate by FriendlyName or common patterns." "INFO"
+                
+                # First, try to find a cert whose FriendlyName matches "IIS-Key-Vault" or similar pattern
+                # IMPORTANT: Replace "IIS-Key-Vault" below with the actual FriendlyName of your certificate if it's different.
+                # You can find this in certlm.msc on the VM in the Personal -> Certificates store.
+                $latestCert = $certsInStore | Where-Object { 
+                    ($_.FriendlyName -like "*IIS-Key-Vault*") -or # Matches if FriendlyName contains "IIS-Key-Vault"
+                    ($_.Subject -like "*CN=$($site.Name)*") -or # Matches CN of cert to site name
+                    ($_.DnsNames -contains $site.Name) # Matches SAN of cert to site name
                 } | Select-Object -First 1
 
                 if ($null -eq $latestCert) {
-                    Write-Log "    No specific certificate found for IP-based binding for site '$($site.Name)'. Trying to find any latest valid certificate." "WARN"
-                    # Fallback: if no specific match, just pick the newest *IIS-Key-Vault* certificate.
-                    # Adjust this fallback if you have multiple certificates for IP-based sites.
-                    $latestCert = $certsInStore | Where-Object { $_.Subject -like "*CN=IIS-Key-Vault*" } | Select-Object -First 1
+                    Write-Log "    Specific certificate for IP-based binding for site '$($site.Name)' not found by friendly name or CN/SAN. Trying to find a general latest valid cert in the store." "WARN"
+                    # Fallback: if no specific match, just pick the overall newest valid certificate.
+                    # This fallback is less precise but might work if only one relevant cert is present.
+                    $latestCert = $certsInStore | Select-Object -First 1
                 }
                 
             } else {
@@ -127,6 +131,8 @@ foreach ($site in $iisWebsites) {
             continue
         }
 
+        Write-Log "  Found target certificate: Subject = '$($latestCert.Subject)', FriendlyName = '$($latestCert.FriendlyName)', Thumbprint = '$($latestCert.Thumbprint)', NotAfter = '$($latestCert.NotAfter)'"
+
         # Check if the current binding uses the latest cert
         if ($binding.CertificateHash -ne $latestCert.Thumbprint) {
             Write-Log "  Binding for host '$hostHeader' on port '$($binding.Port)' is using an old certificate. Updating to new thumbprint: $($latestCert.Thumbprint)" "WARN"
@@ -139,6 +145,8 @@ foreach ($site in $iisWebsites) {
                 # For IP-based, Set-WebBinding might need the HostHeader parameter as ""
                 $finalHostHeader = if ([string]::IsNullOrEmpty($hostHeader)) { "" } else { $hostHeader }
 
+                # Use New-WebBinding with -Force to ensure it's added, then Set-WebBinding for cert.
+                # Sometimes a direct Set-WebBinding on an existing binding works, but recreating is safer if issues persist.
                 New-WebBinding -Name $site.Name -Protocol "https" -IPAddress $binding.IPAddress -Port $binding.Port -HostHeader $finalHostHeader -SslFlags $binding.SslFlags -ErrorAction Stop
                 Set-WebBinding -Name $site.Name -Protocol "https" -HostHeader $finalHostHeader -IPAddress $binding.IPAddress -Port $binding.Port -SslFlags $binding.SslFlags -CertificateThumbprint $latestCert.Thumbprint -CertificateStoreName $certStorePath.Split('\')[-1] -ErrorAction Stop
 
