@@ -1,0 +1,133 @@
+<#
+.SYNOPSIS
+    Updates existing IIS SSL bindings to the latest valid certificates
+    in the LocalMachine\MY store, primarily matching host headers to certificate Common Names (CNs).
+
+.DESCRIPTION
+    This script iterates through all IIS websites and their existing HTTPS bindings.
+    For each binding, it attempts to find the latest valid certificate in the 'LocalMachine\MY' store
+    whose Subject Common Name (CN) or Subject Alternative Name (SAN) matches the binding's host header.
+    If a newer or more appropriate certificate is found, the existing binding is updated.
+    This version explicitly avoids adding new bindings if no HTTPS binding is found.
+
+.NOTES
+    - This script assumes a convention where IIS website host headers closely match the
+      Common Name (CN) or Subject Alternative Name (SAN) of your SSL certificates.
+    - It prefers SNI (Server Name Indication) bindings (SslFlags = 0).
+    - Requires the WebAdministration PowerShell module (IIS Management Tools installed).
+#>
+
+# Function to log messages with timestamp
+function Write-Log {
+    param(
+        [string]$Message,
+        [string]$Level = "INFO" # INFO, WARN, ERROR
+    )
+    $Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    Write-Host "[$Timestamp] [$Level] $Message"
+}
+
+Write-Log "Starting IIS SSL Binding Update Script (Existing Bindings Only)..."
+
+#region Module Check
+# Import WebAdministration module if not already loaded
+if (-not (Get-Module -ListAvailable -Name WebAdministration)) {
+    Write-Log "WebAdministration module not found. Attempting to install if possible." "WARN"
+}
+try {
+    Import-Module WebAdministration -ErrorAction Stop
+    Write-Log "WebAdministration module imported successfully."
+} catch {
+    Write-Log "Failed to import WebAdministration module. Please ensure IIS Management Tools are installed on this VM." "ERROR"
+    exit 1
+}
+#endregion
+
+#region Certificate Store Path
+$certStorePath = "Cert:\LocalMachine\My" # Default store where Key Vault extension places certs
+#endregion
+
+#region Get All Websites
+$iisWebsites = Get-Website
+if ($iisWebsites.Count -eq 0) {
+    Write-Log "No IIS websites found on this server. Exiting." "INFO"
+    exit 0
+}
+#endregion
+
+#region Main Binding Logic
+foreach ($site in $iisWebsites) {
+    Write-Log "Processing website: $($site.Name)"
+
+    $hostHeadersProcessed = @{} # Track host headers to avoid duplicate processing for a site
+
+    # Iterate existing HTTPS bindings to check for updates
+    $httpsBindingsFound = $site.Bindings | Where-Object { $_.Protocol -eq "https" }
+
+    if ($httpsBindingsFound.Count -eq 0) {
+        Write-Log "  Website '$($site.Name)' has no existing HTTPS bindings to update. Skipping." "INFO"
+        continue # Move to the next website
+    }
+
+    foreach ($binding in $httpsBindingsFound) {
+        $hostHeader = $binding.HostHeader.ToLowerInvariant() # Normalize host header
+        
+        if ($hostHeadersProcessed.ContainsKey($hostHeader)) {
+            Write-Log "  Skipping already processed host header: $hostHeader for site '$($site.Name)'" "INFO"
+            continue
+        }
+        $hostHeadersProcessed[$hostHeader] = $true # Mark as processed
+
+        Write-Log "  Checking binding for host: $hostHeader on port: $($binding.Port)"
+
+        # Find the latest valid certificate for this host header
+        $latestCert = $null
+        try {
+            $latestCert = Get-ChildItem -Path $certStorePath |
+                Where-Object {
+                    $_.NotAfter -gt (Get-Date) -and # Certificate is not expired
+                    (
+                        ($_.Subject -like "*CN=$hostHeader*") -or # Match CN directly
+                        ($_.DnsNames -contains $hostHeader) -or # Match SANs
+                        ($_.DnsNames -contains "*.$hostHeader" -and $hostHeader -notlike "www.*") -or # Match wildcard SAN for subdomain
+                        ("www.$hostHeader" -in $_.DnsNames) # Handle www. conversion for SANs
+                    )
+                } |
+                Sort-Object -Property NotAfter -Descending | # Prefer newer certs
+                Select-Object -First 1
+        } catch {
+            Write-Log "  Error searching for certificate for host '$hostHeader': $($_.Exception.Message)" "ERROR"
+            continue
+        }
+
+        if ($null -eq $latestCert) {
+            Write-Log "  No suitable valid certificate found in '$certStorePath' for host header '$hostHeader'. Current binding will be kept as is." "WARN"
+            continue
+        }
+
+        # Check if the current binding uses the latest cert
+        if ($binding.CertificateHash -ne $latestCert.Thumbprint) {
+            Write-Log "  Binding for host '$hostHeader' on port '$($binding.Port)' is using an old certificate. Updating to new thumbprint: $($latestCert.Thumbprint)" "WARN"
+            try {
+                # Attempt to remove the old binding (important for clean update)
+                # Note: Remove-WebBinding can be tricky; ensuring exact match is key.
+                Remove-WebBinding -Name $site.Name -Protocol "https" -BindingInformation "$($binding.BindingInformation)" -ErrorAction SilentlyContinue | Out-Null
+                Write-Log "    Old binding removed for '$hostHeader' (if it existed)."
+
+                # Add the new binding with the updated certificate
+                New-WebBinding -Name $site.Name -Protocol "https" -IPAddress $binding.IPAddress -Port $binding.Port -HostHeader $hostHeader -SslFlags $binding.SslFlags -ErrorAction Stop
+                Set-WebBinding -Name $site.Name -Protocol "https" -HostHeader $hostHeader -IPAddress $binding.IPAddress -Port $binding.Port -SslFlags $binding.SslFlags -CertificateThumbprint $latestCert.Thumbprint -CertificateStoreName $certStorePath.Split('\')[-1] -ErrorAction Stop
+
+                Write-Log "    Successfully updated binding for '$hostHeader' to certificate $($latestCert.Thumbprint)."
+            } catch {
+                Write-Log "    Failed to update binding for host '$hostHeader' on website '$($site.Name)': $($_.Exception.Message)" "ERROR"
+            }
+        } else {
+            Write-Log "  Binding for host '$hostHeader' on port '$($binding.Port)' is already using the correct certificate. No update needed." "INFO"
+        }
+    }
+}
+#endregion
+
+Write-Log "IIS SSL Binding Auto-Update Script finished."
+exit 0
