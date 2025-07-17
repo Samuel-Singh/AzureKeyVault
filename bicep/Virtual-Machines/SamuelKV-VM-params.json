@@ -1,0 +1,29 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "vmName": {
+      "value": "SamuelKV"
+    },
+    "location": {
+      "value": "eastus"
+    },
+    "resourceGroupName": {
+      "value": "Samuel_KeyVault_RG"
+    },
+    "observedCertificates": {
+      "value": [
+        {
+          "url": "https://samuelkv.vault.azure.net/secrets/IIS-Key-Vault/",
+          "certificateStoreName": "MY",
+          "certificateStoreLocation": "LocalMachine"
+        },
+        {
+          "url": "https://samuelkv.vault.azure.net/secrets/Second-Cert-Key-Vault/",
+          "certificateStoreName": "MY",
+          "certificateStoreLocation": "LocalMachine"
+        }
+      ]
+    }
+  }
+}
