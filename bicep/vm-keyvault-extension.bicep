@@ -1,22 +1,22 @@
 // Define parameters for your deployment
 param vmName string        // The name of your existing VM
 param location string      // The location of your existing VM
-param resourceGroupName string // The resource group where your VM exists
+param resourceGroupName string // The resource group where your VM exists - Still needed for clarity and potential future use in the template
 
 // This is the core parameter that will hold your list of certificates
 param observedCertificates array = []
 
 // --- Existing VM Resource Reference ---
-// Reference the VM in the specified resource group
+// Reference the VM. The deployment context already points to its resource group.
 resource vm 'Microsoft.Compute/virtualMachines@2024-11-01' existing = {
   name: vmName
-  scope: resourceGroup(resourceGroupName) // Specify the scope to the correct resource group
+  // REMOVE THIS LINE: scope: resourceGroup(resourceGroupName)
 }
 
 // --- Key Vault VM Extension Resource Definition ---
 resource keyVaultExtension 'Microsoft.Compute/virtualMachines/extensions@2023-09-01' = {
   name: 'KeyVaultForWindows'
-  parent: vm
+  parent: vm // This implicitly links it to the VM's scope
   location: location
 
   properties: {
