@@ -1,24 +1,31 @@
-name: Deploy VM Key Vault Extension
+name: Deploy VM Key Vault Extension (Multi-VM - Option A)
 
 on:
   push:
     branches:
-      - main # Trigger on pushes to the main branch
+      - main
     paths:
-      - 'bicep/**' # Only trigger if files in the bicep directory change
+      - 'bicep/**' # Trigger if any bicep file (including param files) changes
   workflow_dispatch: # Allow manual triggering from GitHub UI
 
 env:
-  # Define environment variables for common values
-  RESOURCE_GROUP_NAME: Samuel_KeyVault_RG
-  VM_NAME: SamuelKV
-  # Corrected paths to be relative to the repository root after checkout
   BICEP_FILE_PATH: bicep/vm-keyvault-extension.bicep
-  PARAMETERS_FILE_PATH: bicep/vm-keyvault-extension.parameters.json
 
 jobs:
   deploy:
     runs-on: ubuntu-22.04 # Use a specific Ubuntu LTS runner for stability
+
+    strategy:
+      fail-fast: false # This is CRITICAL. It ensures that if one job fails, others still run.
+      matrix:
+        # List all your VM parameter files here.
+        # Ensure these paths are correct relative to your repository root.
+        vm_params_file:
+          - 'bicep/vm1-params.json'
+          - 'bicep/vm2-params.json'
+          # Add more files as you create them:
+          # - 'bicep/vm3-params.json'
+          # - 'bicep/another-vm-params.json'
 
     steps:
       - name: Checkout Repository
@@ -29,15 +36,34 @@ jobs:
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }} # GitHub Secret containing your Service Principal JSON
 
-      - name: Wait before deployment
-        run: sleep 10 # Wait for 10 seconds (optional, but can help with transient issues)
+      - name: Extract Parameters from ${{ matrix.vm_params_file }}
+        id: extract_params
+        run: |
+          VM_NAME=$(jq -r '.parameters.vmName.value' "${{ matrix.vm_params_file }}")
+          RESOURCE_GROUP=$(jq -r '.parameters.resourceGroupName.value' "${{ matrix.vm_params_file }}")
+          
+          echo "VM_NAME=$VM_NAME" >> $GITHUB_OUTPUT
+          echo "RESOURCE_GROUP=$RESOURCE_GROUP" >> $GITHUB_OUTPUT
+        shell: bash
 
-      - name: Deploy VM Key Vault Extension
+      - name: Deploy VM Key Vault Extension for ${{ steps.extract_params.outputs.VM_NAME }}
         uses: azure/arm-deploy@v2 # Using @v2 is generally preferred for the latest features/fixes
+        id: arm_deploy # Add an ID to this step to check its outcome
         with:
           subscriptionId: ${{ secrets.AZURE_SUBSCRIPTION_ID || fromJson(secrets.AZURE_CREDENTIALS).subscriptionId }}
-          resourceGroupName: ${{ env.RESOURCE_GROUP_NAME }}
+          resourceGroupName: ${{ steps.extract_params.outputs.RESOURCE_GROUP }} # Dynamic Resource Group
           template: ${{ env.BICEP_FILE_PATH }}
-          parameters: ${{ env.PARAMETERS_FILE_PATH }}
-          deploymentName: deploy-kv-ext-${{ github.run_id }}
+          parameters: ${{ matrix.vm_params_file }} # Use the matrix variable here
+          deploymentName: deploy-kv-ext-${{ steps.extract_params.outputs.VM_NAME }}-${{ github.run_id }}
           failOnStdErr: false # Keep this to explicitly ignore non-critical stderr output
+          # continue-on-error is handled by strategy.fail-fast: false at the job level
+          # and checking the step outcome in the next step.
+          
+      - name: Check Deployment Result for ${{ steps.extract_params.outputs.VM_NAME }}
+        if: ${{ steps.arm_deploy.outcome != 'success' }} # This step runs ONLY if the deployment step did NOT succeed
+        run: |
+          echo "❌ Deployment for VM: ${{ steps.extract_params.outputs.VM_NAME }} in RG: ${{ steps.extract_params.outputs.RESOURCE_GROUP }} FAILED. Continuing with other deployments."
+          # Optionally, you could add more detailed logging here, e.g., from the deployment output.
+          # You can choose to fail the entire workflow here if you want to be stricter,
+          # but the current setup allows other matrix jobs to complete.
+        shell: bash
