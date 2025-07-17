@@ -32,15 +32,9 @@ jobs:
       - name: Install Latest Az PowerShell Module (Crucial for compatibility)
         shell: pwsh
         run: |
-          # Ensure PSGallery is trusted for module installation
           Set-PSRepository -Name PSGallery -InstallationPolicy Trusted -ErrorAction Stop
-          
-          # Install/Update the Az module to the latest version
           Install-Module -Name Az -Force -AllowClobber -Scope CurrentUser -ErrorAction Stop
-          
-          # Explicitly import the Az.Accounts module first, then Az.KeyVault
-          Import-Module Az.Accounts -ErrorAction Stop
-          Import-Module Az.KeyVault -ErrorAction Stop
+          Import-Module Az -ErrorAction Stop
           Write-Host "Az modules updated and imported successfully."
 
       - name: Get Current Certificate Expiration
@@ -59,9 +53,14 @@ jobs:
 
           Write-Host "Attempting to connect with TenantId: $TenantId, ClientId: $ClientId, SubscriptionId: $SubscriptionId"
 
-          # --- Robust Connect-AzAccount call ---
-          # Ensure Az.Accounts is already imported by the previous step.
-          Connect-AzAccount -ServicePrincipal -TenantId $TenantId -ApplicationId $ClientId -ClientSecret $ClientSecret -SubscriptionId $SubscriptionId -ErrorAction Stop
+          # --- Robust Authentication using Add-AzAccount with PSCredential ---
+          $SecureClientSecret = ConvertTo-SecureString -String $ClientSecret -AsPlainText -Force
+          $Credential = New-Object System.Management.Automation.PSCredential($ClientId, $SecureClientSecret)
+
+          Add-AzAccount -Credential $Credential -ServicePrincipal -TenantId $TenantId -SubscriptionId $SubscriptionId -ErrorAction Stop
+          
+          # --- Explicitly import Az.KeyVault module AFTER authentication ---
+          Import-Module Az.KeyVault -ErrorAction Stop
           
           $KeyVaultName = "${{ env.KEY_VAULT_NAME }}"
           $CertificateName = "${{ env.CERTIFICATE_NAME_IN_KV }}"
@@ -97,8 +96,13 @@ jobs:
           $SubscriptionId = $Creds.subscriptionId
           $ClientSecret = $env:SP_CLIENT_SECRET # Get the client secret from its dedicated env var
 
-          # --- Robust Connect-AzAccount call ---
-          Connect-AzAccount -ServicePrincipal -TenantId $TenantId -ApplicationId $ClientId -ClientSecret $ClientSecret -SubscriptionId $SubscriptionId -ErrorAction Stop
+          # --- Robust Authentication using Add-AzAccount with PSCredential ---
+          $SecureClientSecret = ConvertTo-SecureString -String $ClientSecret -AsPlainText -Force
+          $Credential = New-Object System.Management.Automation.PSCredential($ClientId, $SecureClientSecret)
+          Add-AzAccount -Credential $Credential -ServicePrincipal -TenantId $TenantId -SubscriptionId $SubscriptionId -ErrorAction Stop
+
+          # --- Explicitly import Az.KeyVault module AFTER authentication ---
+          Import-Module Az.KeyVault -ErrorAction Stop
 
           $certFriendlyName = "${{ env.CERT_FRIENDLY_NAME }}"
           $certCommonName = "${{ env.CERT_COMMON_NAME }}"
@@ -135,8 +139,13 @@ jobs:
           $SubscriptionId = $Creds.subscriptionId
           $ClientSecret = $env:SP_CLIENT_SECRET # Get the client secret from its dedicated env var
 
-          # --- Robust Connect-AzAccount call ---
-          Connect-AzAccount -ServicePrincipal -TenantId $TenantId -ApplicationId $ClientId -ClientSecret $ClientSecret -SubscriptionId $SubscriptionId -ErrorAction Stop
+          # --- Robust Authentication using Add-AzAccount with PSCredential ---
+          $SecureClientSecret = ConvertTo-SecureString -String $ClientSecret -AsPlainText -Force
+          $Credential = New-Object System.Management.Automation.PSCredential($ClientId, $SecureClientSecret)
+          Add-AzAccount -Credential $Credential -ServicePrincipal -TenantId $TenantId -SubscriptionId $SubscriptionId -ErrorAction Stop
+
+          # --- Explicitly import Az.KeyVault module AFTER authentication ---
+          Import-Module Az.KeyVault -ErrorAction Stop
 
           $pfxPassword = "${{ steps.generate_pfx.outputs.PFX_PASSWORD_RAW }}" | ConvertTo-SecureString -AsPlainText -Force
 
