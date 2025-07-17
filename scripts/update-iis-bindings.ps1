@@ -9,10 +9,13 @@
     whose Subject Common Name (CN) or Subject Alternative Name (SAN) matches the binding's host header.
     If a newer or more appropriate certificate is found, the existing binding is updated.
     This version explicitly avoids adding new bindings if no HTTPS binding is found.
+    It also handles bindings with empty host headers (IP-based SSL).
 
 .NOTES
     - This script assumes a convention where IIS website host headers closely match the
       Common Name (CN) or Subject Alternative Name (SAN) of your SSL certificates.
+    - For bindings with no host header (IP-based SSL), it will attempt to find a certificate
+      where its CN matches the website's name, or a general purpose certificate.
     - It prefers SNI (Server Name Indication) bindings (SslFlags = 0).
     - Requires the WebAdministration PowerShell module (IIS Management Tools installed).
 #>
@@ -78,23 +81,42 @@ foreach ($site in $iisWebsites) {
         }
         $hostHeadersProcessed[$hostHeader] = $true # Mark as processed
 
-        Write-Log "  Checking binding for host: $hostHeader on port: $($binding.Port)"
+        Write-Log "  Checking binding for host: '$hostHeader' (empty means IP-based) on port: $($binding.Port)"
 
-        # Find the latest valid certificate for this host header
+        # Find the latest valid certificate for this binding.
+        # Logic is adjusted for empty host headers.
         $latestCert = $null
         try {
-            $latestCert = Get-ChildItem -Path $certStorePath |
-                Where-Object {
-                    $_.NotAfter -gt (Get-Date) -and # Certificate is not expired
-                    (
+            $certsInStore = Get-ChildItem -Path $certStorePath | Where-Object { $_.NotAfter -gt (Get-Date) } | Sort-Object -Property NotAfter -Descending
+
+            if ([string]::IsNullOrEmpty($hostHeader)) {
+                # For IP-based bindings (no host header), try to find a certificate
+                # that matches the website's name as a CN, or a general purpose certificate.
+                # You might need to refine this to match a specific "default" certificate if you have one.
+                Write-Log "    Binding has no host header (IP-based). Attempting to find a certificate matching site name or a general purpose cert." "INFO"
+                $latestCert = $certsInStore | Where-Object {
+                    ($_.Subject -like "*CN=$($site.Name)*") -or # Match site name (e.g., Default Web Site -> CN=Default Web Site)
+                    ($_.Subject -like "*CN=IIS-Key-Vault*") -or # Specific to your scenario: find cert containing "IIS-Key-Vault"
+                    ($_.DnsNames -contains $site.Name) # Match SAN for site name
+                } | Select-Object -First 1
+
+                if ($null -eq $latestCert) {
+                    Write-Log "    No specific certificate found for IP-based binding for site '$($site.Name)'. Trying to find any latest valid certificate." "WARN"
+                    # Fallback: if no specific match, just pick the newest *IIS-Key-Vault* certificate.
+                    # Adjust this fallback if you have multiple certificates for IP-based sites.
+                    $latestCert = $certsInStore | Where-Object { $_.Subject -like "*CN=IIS-Key-Vault*" } | Select-Object -First 1
+                }
+                
+            } else {
+                # For bindings with a host header, use existing logic
+                $latestCert = $certsInStore |
+                    Where-Object {
                         ($_.Subject -like "*CN=$hostHeader*") -or # Match CN directly
                         ($_.DnsNames -contains $hostHeader) -or # Match SANs
                         ($_.DnsNames -contains "*.$hostHeader" -and $hostHeader -notlike "www.*") -or # Match wildcard SAN for subdomain
                         ("www.$hostHeader" -in $_.DnsNames) # Handle www. conversion for SANs
-                    )
-                } |
-                Sort-Object -Property NotAfter -Descending | # Prefer newer certs
-                Select-Object -First 1
+                    } | Select-Object -First 1
+            }
         } catch {
             Write-Log "  Error searching for certificate for host '$hostHeader': $($_.Exception.Message)" "ERROR"
             continue
@@ -110,13 +132,15 @@ foreach ($site in $iisWebsites) {
             Write-Log "  Binding for host '$hostHeader' on port '$($binding.Port)' is using an old certificate. Updating to new thumbprint: $($latestCert.Thumbprint)" "WARN"
             try {
                 # Attempt to remove the old binding (important for clean update)
-                # Note: Remove-WebBinding can be tricky; ensuring exact match is key.
                 Remove-WebBinding -Name $site.Name -Protocol "https" -BindingInformation "$($binding.BindingInformation)" -ErrorAction SilentlyContinue | Out-Null
                 Write-Log "    Old binding removed for '$hostHeader' (if it existed)."
 
                 # Add the new binding with the updated certificate
-                New-WebBinding -Name $site.Name -Protocol "https" -IPAddress $binding.IPAddress -Port $binding.Port -HostHeader $hostHeader -SslFlags $binding.SslFlags -ErrorAction Stop
-                Set-WebBinding -Name $site.Name -Protocol "https" -HostHeader $hostHeader -IPAddress $binding.IPAddress -Port $binding.Port -SslFlags $binding.SslFlags -CertificateThumbprint $latestCert.Thumbprint -CertificateStoreName $certStorePath.Split('\')[-1] -ErrorAction Stop
+                # For IP-based, Set-WebBinding might need the HostHeader parameter as ""
+                $finalHostHeader = if ([string]::IsNullOrEmpty($hostHeader)) { "" } else { $hostHeader }
+
+                New-WebBinding -Name $site.Name -Protocol "https" -IPAddress $binding.IPAddress -Port $binding.Port -HostHeader $finalHostHeader -SslFlags $binding.SslFlags -ErrorAction Stop
+                Set-WebBinding -Name $site.Name -Protocol "https" -HostHeader $finalHostHeader -IPAddress $binding.IPAddress -Port $binding.Port -SslFlags $binding.SslFlags -CertificateThumbprint $latestCert.Thumbprint -CertificateStoreName $certStorePath.Split('\')[-1] -ErrorAction Stop
 
                 Write-Log "    Successfully updated binding for '$hostHeader' to certificate $($latestCert.Thumbprint)."
             } catch {
