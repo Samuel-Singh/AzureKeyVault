@@ -1,0 +1,142 @@
+name: Scheduled Key Vault Certificate Renewal (Multi-Cert - External Config)
+
+on:
+  workflow_dispatch: # Allows manual triggering
+  schedule:
+    - cron: '0 0 * * *' # Runs once every 24 hours at midnight UTC
+
+env:
+  # Global settings for certificate generation
+  CERT_VALIDITY_DAYS: "30"       # How long the newly generated certificate will be valid (in days)
+  RENEWAL_THRESHOLD_DAYS: "30"   # Number of days before expiration to trigger renewal
+
+  # Path to your external certificate configuration file
+  CERT_CONFIG_FILE_PATH: 'certificates.json' # Adjust path if your file is in a subdirectory (e.g., 'config/certificates.json')
+
+jobs:
+  renew_multiple_certificates:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+          enable-AzPSSession: true
+
+      - name: Install Latest Az PowerShell Modules
+        shell: pwsh
+        run: |
+          Set-PSRepository -Name PSGallery -InstallationPolicy Trusted -ErrorAction Stop
+          Install-Module -Name Az -Force -AllowClobber -Scope CurrentUser -ErrorAction Stop
+          Import-Module Az -ErrorAction Stop
+          Write-Host "Az modules updated and imported successfully."
+
+      - name: Process Multiple Certificates
+        id: process_certs
+        shell: pwsh
+        env:
+          AZURE_CREDS_JSON: ${{ secrets.AZURE_CREDENTIALS }}
+          SP_CLIENT_SECRET: ${{ fromJson(secrets.AZURE_CREDENTIALS).clientSecret }}
+          AZURE_SUBSCRIPTION_ID_FROM_CREDS: ${{ fromJson(secrets.AZURE_CREDENTIALS).subscriptionId }}
+          PFX_PASSWORD_SECRET: ${{ secrets.PFX_PASSWORD }} 
+          
+          # Pass the path to the external config file
+          CONFIG_FILE: ${{ env.CERT_CONFIG_FILE_PATH }}
+        run: |
+          # --- Initial Azure Authentication for the step ---
+          $Creds = ConvertFrom-Json -InputObject $env:AZURE_CREDS_JSON
+          $TenantId = $Creds.tenantId
+          $ClientId = $Creds.clientId
+          $SubscriptionId = $env:AZURE_SUBSCRIPTION_ID_FROM_CREDS
+          $ClientSecret = $env:SP_CLIENT_SECRET
+          
+          $SecureClientSecret = ConvertTo-SecureString -String $ClientSecret -AsPlainText -Force
+          $Credential = New-Object System.Management.Automation.PSCredential($ClientId, $SecureClientSecret)
+          Add-AzAccount -Credential $Credential -ServicePrincipal -TenantId $TenantId -SubscriptionId $SubscriptionId -ErrorAction Stop
+
+          Import-Module Az.KeyVault -ErrorAction Stop
+          
+          $RenewalThreshold = [int]${{ env.RENEWAL_THRESHOLD_DAYS }}
+          $ValidityDays = [int]${{ env.CERT_VALIDITY_DAYS }}
+          $PfxPassword = ConvertTo-SecureString -String "${{ env.PFX_PASSWORD_SECRET }}" -AsPlainText -Force
+
+          $allPfxsDir = "C:\temp\GeneratedPfxs-$((Get-Date).ToString('yyyyMMddHHmmss'))"
+          New-Item -Path $allPfxsDir -ItemType Directory -Force | Out-Null
+
+          # --- Read and parse certificate configurations from the external file ---
+          Write-Host "Reading certificate configurations from '$($env:CONFIG_FILE)'..."
+          $certificatesToProcess = Get-Content -Path $env:CONFIG_FILE | ConvertFrom-Json
+
+          # --- Loop through each certificate ---
+          foreach ($certConfig in $certificatesToProcess) {
+              $certFriendlyName = $certConfig.friendlyName
+              $certCommonName = $certConfig.commonName
+              $keyVaultName = $certConfig.keyVaultName
+              $certificateNameInKv = $certConfig.certificateNameInKv
+
+              Write-Host "`n--- Processing Certificate: '$certFriendlyName' (KV: '$keyVaultName', Name: '$certificateNameInKv') ---"
+
+              # --- Check Certificate Expiration ---
+              $daysRemaining = 0 
+              try {
+                  $cert = Get-AzKeyVaultCertificate -VaultName $keyVaultName -Name $certificateNameInKv -ErrorAction Stop
+                  $currentExpiryDate = $cert.Expires
+                  $daysRemaining = ($currentExpiryDate - (Get-Date)).Days
+                  Write-Host "  Current certificate expires on: $currentExpiryDate. Days remaining: $daysRemaining"
+              }
+              catch {
+                  Write-Error "  Failed to retrieve certificate '$certificateNameInKv'. Error: $($_.Exception.Message)"
+                  Write-Host "  Assuming certificate does not exist or cannot be accessed. Proceeding with creation/renewal."
+              }
+
+              # --- Conditional Generation and Upload ---
+              if ($daysRemaining -le $RenewalThreshold) {
+                  Write-Host "  Renewal needed (Days remaining: $daysRemaining <= Threshold: $RenewalThreshold). Generating and uploading new PFX."
+
+                  # --- Generate Self-Signed Certificate ---
+                  Write-Host "    Generating new self-signed certificate '$certFriendlyName'..."
+                  $newCert = New-SelfSignedCertificate `
+                      -DnsName $certCommonName `
+                      -CertStoreLocation "Cert:\CurrentUser\My" `
+                      -FriendlyName $certFriendlyName `
+                      -NotAfter (Get-Date).AddDays($ValidityDays) `
+                      -KeyUsage DigitalSignature, KeyEncipherment `
+                      -TextExtension @("2.5.29.37={text}1.3.6.1.5.5.7.3.1,1.3.6.1.5.5.7.3.2", "2.5.29.19={text}CA=FALSE") `
+                      -ErrorAction Stop
+
+                  Write-Host "    New certificate generated successfully. Thumbprint: $($newCert.Thumbprint)"
+
+                  # --- Export PFX ---
+                  $pfxPath = Join-Path -Path $allPfxsDir -ChildPath "$($certFriendlyName).pfx"
+                  Export-PfxCertificate -Cert $newCert -FilePath $pfxPath -Password $PfxPassword -ErrorAction Stop
+                  Write-Host "    PFX file exported to: $pfxPath"
+
+                  # --- Upload to Azure Key Vault ---
+                  Write-Host "    Importing PFX into Key Vault '$keyVaultName' as '$certificateNameInKv'..."
+                  Import-AzKeyVaultCertificate `
+                      -VaultName $keyVaultName `
+                      -Name $certificateNameInKv `
+                      -FilePath $pfxPath `
+                      -Password $PfxPassword `
+                      -ErrorAction Stop
+
+                  Write-Host "    Certificate '$certificateNameInKv' (Friendly Name: '$certFriendlyName') imported into Key Vault '$keyVaultName' successfully!"
+              } else {
+                  Write-Host "  No renewal needed for '$certFriendlyName'. Days remaining: $daysRemaining."
+              }
+          } # End foreach loop
+
+          echo "generated_pfxs_dir=$allPfxsDir" >> $env:GITHUB_OUTPUT
+          Write-Host "`nAll certificates processed."
+
+      - name: Upload All Generated PFXs as Artifact (Optional)
+        uses: actions/upload-artifact@v4
+        if: success() && steps.process_certs.outputs.generated_pfxs_dir
+        with:
+          name: All-Generated-PFXs
+          path: ${{ steps.process_certs.outputs.generated_pfxs_dir }}
+          retention-days: 7
