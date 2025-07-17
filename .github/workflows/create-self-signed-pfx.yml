@@ -12,7 +12,7 @@ env:
   CERT_VALIDITY_DAYS: "30"                     # How long the newly generated certificate will be valid (in days)
   RENEWAL_THRESHOLD_DAYS: "30"                 # Number of days before expiration to trigger renewal
   KEY_VAULT_NAME: "samuelkv"                   # Your Azure Key Vault name
-  CERTIFICATE_NAME_IN_KV: "IIS-Key-Vault-Cert" # Name of the certificate in Key Vault
+  CERTIFICATE_NAME_IN_KV: "IIS-Key-Vault" # Name of the certificate in Key Vault
 
 jobs:
   renew_cert_if_needed:
