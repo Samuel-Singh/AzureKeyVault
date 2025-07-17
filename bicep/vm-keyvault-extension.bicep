@@ -57,7 +57,12 @@ resource iisBindingScriptExtension 'Microsoft.Compute/virtualMachines/extensions
     type: 'CustomScriptExtension'
     typeHandlerVersion: '1.9' // For Windows VMs, typically 1.9 or later
     autoUpgradeMinorVersion: true
-    
+    // ADD THIS LINE TO FORCE REDEPLOYMENT/REDOWNLOAD
+    // Change this value every time you update the script and want it re-downloaded
+    // forceUpdateTag: '202507172345' // Example: current date/time in YYYYMMDDHHMM format, update this for each run
+    // You could also use a newGuid() function if you want it to change automatically:
+    forceUpdateTag: '${newGuid()}' // This will always force a re-run/re-download
+
     settings: {
       fileUris: [
         iisScriptFileUri
