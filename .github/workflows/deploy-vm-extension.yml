@@ -1,4 +1,4 @@
-name: Deploy VM Key Vault Extension (Multi-VM - Option A)
+name: Deploy VM Key Vault Extension
 
 on:
   push:
