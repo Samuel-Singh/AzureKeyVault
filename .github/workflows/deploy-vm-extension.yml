@@ -21,7 +21,7 @@ jobs:
         # List all your VM parameter files here.
         # Ensure these paths are correct relative to your repository root.
         vm_params_file:
-          - 'bicep/Virtual-Machines/vm1-params.json'
+          - 'bicep/Virtual-Machines/SamuelKV-VM-params.json'
           # Add more files as you create them:
           # - 'bicep/vm3-params.json'
           # - 'bicep/another-vm-params.json'
