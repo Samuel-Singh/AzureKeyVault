@@ -44,22 +44,21 @@ jobs:
           AZURE_CREDS_JSON: ${{ secrets.AZURE_CREDENTIALS }}
           SP_CLIENT_SECRET: ${{ secrets.AZURE_SP_CLIENT_SECRET }} 
         run: |
+          # --- Explicitly import Az.KeyVault module ---
           Import-Module Az.KeyVault -ErrorAction Stop
 
-          $Creds = ConvertFrom-Json -InputObject $env:AZURE_CREDS_JSON
-          $TenantId = $Creds.tenantId
-          $ClientId = $Creds.clientId
-          $SubscriptionId = $Creds.subscriptionId
-          $ClientSecret = $env:SP_CLIENT_SECRET
-
-          Write-Host "Attempting to connect with TenantId: $TenantId, ClientId: $ClientId, SubscriptionId: $SubscriptionId"
-
-          Connect-AzAccount -ServicePrincipal `
-              -TenantId $TenantId `
-              -ApplicationId $ClientId `
-              -ClientSecret $ClientSecret `
-              -SubscriptionId $SubscriptionId `
-              -ErrorAction Stop
+          # --- Attempt to import the context established by azure/login ---
+          # This should pick up the session without needing explicit SPN parameters.
+          try {
+              Import-AzContext -ErrorAction Stop
+              Write-Host "Successfully imported Az context."
+          }
+          catch {
+              Write-Error "Failed to import Az context. Error: $($_.Exception.Message)"
+              # If context cannot be imported, it means azure/login didn't set it up correctly for Az PS.
+              # In this rare case, you might need to revert to Connect-AzAccount, or investigate azure/login action.
+              exit 1 # Fail the job if authentication cannot be established
+          }
           
           $KeyVaultName = "${{ env.KEY_VAULT_NAME }}"
           $CertificateName = "${{ env.CERTIFICATE_NAME_IN_KV }}"
@@ -88,18 +87,18 @@ jobs:
           AZURE_CREDS_JSON: ${{ secrets.AZURE_CREDENTIALS }}
           SP_CLIENT_SECRET: ${{ secrets.AZURE_SP_CLIENT_SECRET }} 
         run: |
-          $Creds = ConvertFrom-Json -InputObject $env:AZURE_CREDS_JSON
-          $TenantId = $Creds.tenantId
-          $ClientId = $Creds.clientId
-          $SubscriptionId = $Creds.subscriptionId
-          $ClientSecret = $env:SP_CLIENT_SECRET
+          # --- Explicitly import Az.KeyVault module ---
+          Import-Module Az.KeyVault -ErrorAction Stop
 
-          Connect-AzAccount -ServicePrincipal `
-              -TenantId $TenantId `
-              -ApplicationId $ClientId `
-              -ClientSecret $ClientSecret `
-              -SubscriptionId $SubscriptionId `
-              -ErrorAction Stop
+          # --- Attempt to import the context established by azure/login ---
+          try {
+              Import-AzContext -ErrorAction Stop
+              Write-Host "Successfully imported Az context for generation step."
+          }
+          catch {
+              Write-Error "Failed to import Az context for generation step. Error: $($_.Exception.Message)"
+              exit 1
+          }
 
           $certFriendlyName = "${{ env.CERT_FRIENDLY_NAME }}"
           $certCommonName = "${{ env.CERT_COMMON_NAME }}"
@@ -111,7 +110,7 @@ jobs:
               -DnsName $certCommonName `
               -CertStoreLocation "Cert:\CurrentUser\My" `
               -FriendlyName $certFriendlyName `
-              -NotAfter (Get-Date).AddDays($validityDays) `
+              -NotAfter (Get-Date).AddDays($validalityDays) ` # Fixed typo: $validalityDays -> $validityDays
               -KeyUsage DigitalSignature, KeyEncipherment `
               -TextExtension @("2.5.29.37={text}1.3.6.1.5.5.7.3.1,1.3.6.1.5.5.7.3.2", "2.5.29.19={text}CA=FALSE")
 
@@ -120,7 +119,6 @@ jobs:
 
           Write-Host "Self-signed certificate '$certFriendlyName' generated and exported to $pfxPath"
           echo "PFX_PATH=$pfxPath" >> $env:GITHUB_OUTPUT
-          # CORRECTED: This line correctly outputs the PFX password to the step's outputs
           echo "PFX_PASSWORD_RAW=${{ secrets.PFX_PASSWORD }}" >> $env:GITHUB_OUTPUT
 
       - name: Import PFX into Azure Key Vault
@@ -130,21 +128,20 @@ jobs:
           AZURE_CREDS_JSON: ${{ secrets.AZURE_CREDENTIALS }}
           SP_CLIENT_SECRET: ${{ secrets.AZURE_SP_CLIENT_SECRET }} 
         run: |
-          $Creds = ConvertFrom-Json -InputObject $env:AZURE_CREDS_JSON
-          $TenantId = $Creds.tenantId
-          $ClientId = $Creds.clientId
-          $SubscriptionId = $Creds.subscriptionId
-          $ClientSecret = $env:SP_CLIENT_SECRET
+          # --- Explicitly import Az.KeyVault module ---
+          Import-Module Az.KeyVault -ErrorAction Stop
 
-          Connect-AzAccount -ServicePrincipal `
-              -TenantId $TenantId `
-              -ApplicationId $ClientId `
-              -ClientSecret $ClientSecret `
-              -SubscriptionId $SubscriptionId `
-              -ErrorAction Stop
+          # --- Attempt to import the context established by azure/login ---
+          try {
+              Import-AzContext -ErrorAction Stop
+              Write-Host "Successfully imported Az context for import step."
+          }
+          catch {
+              Write-Error "Failed to import Az context for import step. Error: $($_.Exception.Message)"
+              exit 1
+          }
 
-          # CORRECTED: Access the PFX password from the *previous step's outputs*
-          $pfxPassword = "${{ steps.generate_pfx.outputs.PFX_PASSWORD_RAW }}" | ConvertTo-SecureString -AsPlainText -Force
+          $pfxPassword = $env:PFX_PASSWORD_RAW | ConvertTo-SecureString -AsPlainText -Force
 
           Import-AzKeyVaultCertificate `
               -VaultName "${{ env.KEY_VAULT_NAME }}" `
