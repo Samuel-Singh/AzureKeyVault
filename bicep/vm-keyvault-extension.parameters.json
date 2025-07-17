@@ -21,6 +21,11 @@
           "certificateStoreLocation": "LocalMachine"
         },
         {
+          "url": "https://samuelkv.vault.azure.net/secrets/IIS-Key-Vault/",
+          "certificateStoreName": "MY",
+          "certificateStoreLocation": "LocalMachine"
+        },
+        {
           "url": "https://samuelkv.vault.azure.net/secrets/IIScert/",
           "certificateStoreName": "MY",
           "certificateStoreLocation": "LocalMachine"
