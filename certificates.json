@@ -1,0 +1,14 @@
+[
+  {
+    "friendlyName": "IIS-Key-Vault",
+    "commonName": "IIS-Key-Vault",
+    "keyVaultName": "samuelkv",
+    "certificateNameInKv": "IIS-Key-Vault"
+  },
+  {
+    "friendlyName": "Second-Cert-Key-Vault",
+    "commonName": "Second-Cert-Key-Vault",
+    "keyVaultName": "samuelkv",
+    "certificateNameInKv": "Second-Cert-Key-Vault"
+  }
+]
