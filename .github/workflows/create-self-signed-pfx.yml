@@ -9,7 +9,7 @@ env:
   CERT_COMMON_NAME: "IIS-Key-Vault"  # The Common Name (CN) / primary DNS name for the cert
   CERT_VALIDITY_DAYS: "30"               # How long the certificate will be valid (in days)
   KEY_VAULT_NAME: "samuelkv"           # Your Azure Key Vault name
-  CERTIFICATE_NAME_IN_KV: "IIS-Key-Vault-Cert" # Name of the certificate to store in Key Vault
+  CERTIFICATE_NAME_IN_KV: "IIS-Key-Vault" # Name of the certificate to store in Key Vault
 
 jobs:
   generate_and_upload_pfx:
