@@ -64,8 +64,29 @@ foreach ($site in $iisWebsites) {
 
     $hostHeadersProcessed = @{} # Track host headers to avoid duplicate processing for a site
 
+    # --- UPDATED DEBUGGING BLOCK ---
+    Write-Log "  Dumping all raw bindings found for site '$($site.Name)':"
+    $allSiteBindings = $site.Bindings
+    if ($allSiteBindings.Count -eq 0) {
+        Write-Log "    No bindings found for this site at all (raw collection empty)."
+    } else {
+        foreach ($b in $allSiteBindings) {
+            # Explicitly cast Protocol to string and trim any whitespace
+            Write-Log "    Raw Binding - Protocol: '$([string]$b.Protocol.Trim())', Info: '$([string]$b.BindingInformation.Trim())', Host: '$([string]$b.HostHeader.Trim())', Port: '$([string]$b.Port.ToString().Trim())'"
+        }
+    }
+    # --- END UPDATED DEBUGGING BLOCK ---
+
+
     # Iterate existing HTTPS bindings to check for updates
-    $httpsBindingsFound = $site.Bindings | Where-Object { $_.Protocol -eq "https" }
+    # Explicitly cast $_.Protocol to string and trim to avoid any type/whitespace issues
+    $httpsBindingsFound = $site.Bindings | Where-Object { ([string]$_.Protocol.Trim()) -eq "https" }
+
+    # --- NEW DEBUGGING AFTER FILTERING ---
+    if ($httpsBindingsFound.Count -gt 0) {
+        Write-Log "  After filtering, found $($httpsBindingsFound.Count) HTTPS binding(s) for site '$($site.Name)'."
+    }
+    # --- END NEW DEBUGGING AFTER FILTERING ---
 
     if ($httpsBindingsFound.Count -eq 0) {
         Write-Log "  Website '$($site.Name)' has no existing HTTPS bindings to update. Skipping." "INFO"
