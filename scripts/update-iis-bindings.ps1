@@ -173,10 +173,12 @@ foreach ($site in $iisWebsites) {
                     Write-Log "  Found target certificate: Subject = '$($latestCert.Subject)', FriendlyName = '$($latestCert.FriendlyName)', Thumbprint = '$($latestCert.Thumbprint)', NotAfter = '$($latestCert.NotAfter)'"
 
                     # Get current binding's certificate hash using Get-Item (WebAdministration)
+                    # We still use Get-WebBinding here because appcmd.exe's 'list' command doesn't easily expose the cert hash.
+                    # It's okay to use it here because we're only reading, not relying on complex property access.
                     $currentBinding = Get-WebBinding -Name $site.Name -Protocol "https" -BindingInformation "$bindingInformation" -ErrorAction SilentlyContinue
                     $currentCertHash = ""
-                    if ($currentBinding -and ($currentBinding.CertificateHash | Select-Object -ExpandProperty Value)) {
-                         $currentCertHash = ($currentBinding.CertificateHash | Select-Object -ExpandProperty Value) -as [string] | ForEach-Object { $_.Trim() }
+                    if ($currentBinding -and $currentBinding.Attributes["certificateHash"]) {
+                         $currentCertHash = ($currentBinding.Attributes["certificateHash"] | Select-Object -ExpandProperty Value) -as [string] | ForEach-Object { $_.Trim() }
                     }
 
                     # Check if the current binding uses the latest cert
@@ -184,13 +186,10 @@ foreach ($site in $iisWebsites) {
                         Write-Log "  Binding for host '$hostHeader' on port '$port' is using an old certificate. Updating to new thumbprint: $($latestCert.Thumbprint)" "WARN"
                         try {
                             # Using appcmd to update the binding. This is often more reliable than remove/add with Set-WebBinding
-                            # For appcmd, the format is "protocol/bindingInformation" and then attributes
-                            $appcmdBindingId = "$protocol/$bindingInformation"
-                            if (-not [string]::IsNullOrEmpty($hostHeader)) {
-                                $appcmdBindingId += ":$hostHeader"
-                            }
+                            # Construct the appcmd command using triple quotes for easier embedding of required double quotes for appcmd.
+                            # Example appcmd format: appcmd set site "MySite" /bindings.[protocol='https',bindingInformation='*:443:',hostHeader='example.com'].sslFlags:0 /bindings.[protocol='https',bindingInformation='*:443:',hostHeader='example.com'].certificateStoreName:My /bindings.[protocol='https',bindingInformation='*:443:',hostHeader='example.com'].certificateHash:THUMBPRINT
                             
-                            $appcmdCommand = "$appCmdPath set site /site.name:\"$($site.Name)\" /bindings.[protocol='$protocol',bindingInformation='$bindingInformation',hostHeader='$hostHeader'].sslFlags:$numericSslFlags /bindings.[protocol='$protocol',bindingInformation='$bindingInformation',hostHeader='$hostHeader'].certificateStoreName:$($certStorePath.Split('\')[-1]) /bindings.[protocol='$protocol',bindingInformation='$bindingInformation',hostHeader='$hostHeader'].certificateHash:$($latestCert.Thumbprint)"
+                            $appcmdCommand = "$appCmdPath set site ""$($site.Name)"" /bindings.[protocol='$protocol',bindingInformation='$bindingInformation',hostHeader='$hostHeader'].sslFlags:$numericSslFlags /bindings.[protocol='$protocol',bindingInformation='$bindingInformation',hostHeader='$hostHeader'].certificateStoreName:$($certStorePath.Split('\')[-1]) /bindings.[protocol='$protocol',bindingInformation='$bindingInformation',hostHeader='$hostHeader'].certificateHash:$($latestCert.Thumbprint)"
                             
                             Write-Log "    Executing appcmd: $appcmdCommand"
                             $appcmdResult = Invoke-Expression $appcmdCommand -ErrorAction Stop
