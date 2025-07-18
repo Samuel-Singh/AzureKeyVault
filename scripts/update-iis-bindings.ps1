@@ -74,12 +74,17 @@ foreach ($site in $iisWebsites) {
     $hostHeadersProcessed = @{} # Track host headers to avoid duplicate processing for a site
 
     Write-Log "  Using appcmd.exe to dump all raw bindings for site '$($site.Name)':"
-    # Get all bindings for the site using appcmd.exe
-    # Output format is "protocol/bindingInformation:hostHeader"
-    $appCmdBindingsRaw = (&$appCmdPath list site "$($site.Name)" /config /text:bindings) -split ' ' | Where-Object { $_ -match '^(.+?)/(.+)$' }
+    # Get all bindings for the site using appcmd.exe with /text:bindings
+    # Output format is now comma-separated: protocol/bindingInfo,protocol/bindingInfo
+    $rawAppCmdBindingsText = (&$appCmdPath list site "$($site.Name)" /text:bindings)
+
+    Write-Log "    Raw appcmd.exe output for bindings: `n$rawAppCmdBindingsText" # For debugging
+
+    # Split the comma-separated bindings and then parse each individual binding string
+    $appCmdBindingsRaw = $rawAppCmdBindingsText -split ',' | Where-Object { $_ -match '^(.+?)/(.+)$' }
 
     if ($appCmdBindingsRaw.Count -eq 0) {
-        Write-Log "    No bindings found for this site at all via appcmd.exe."
+        Write-Log "    No bindings found for this site at all via appcmd.exe. (After parsing)"
     } else {
         foreach ($bindingString in $appCmdBindingsRaw) {
             # Extract protocol and bindingInformation part
@@ -89,25 +94,21 @@ foreach ($site in $iisWebsites) {
 
                 # Extract bindingInformation, hostHeader and potential sslFlags from bindingInfoAndHost
                 # Example: *:443:host.com or *:443: or *:443: sslFlags=0
-                $bindingParts = $bindingInfoAndHost -split ':'
-                $bindingInformation = ($bindingParts | Select-Object -First 2) -join ':' # e.g., *:443
+                # When using /text:bindings, the output doesn't explicitly include sslFlags or hostHeader
+                # So, we'll try to get them from the Get-WebBinding object for existing HTTPS bindings.
+
+                $bindingInformation = ($bindingInfoAndHost -split ':') | Select-Object -First 2 | Join-String -Separator ':' # e.g., *:443
                 $hostHeader = ""
-                $sslFlags = "0" # Default
+                $sslFlags = "0" # Default, assume SNI unless found otherwise
 
-                if ($bindingParts.Count -gt 2) {
-                    $potentialHostOrFlags = ($bindingParts | Select-Object -Skip 2) -join ':'
-                    if ($potentialHostOrFlags -match '^(.*?)\s*sslFlags=(\d+)$') {
-                        $hostHeader = $Matches[1].Trim()
-                        $sslFlags = $Matches[2]
-                    } else {
-                        $hostHeader = $potentialHostOrFlags.Trim()
-                    }
+                # When using /text:bindings, hostHeader might not be explicitly present, or it's part of bindingInfoAndHost.
+                # Let's try to extract hostHeader if it exists in bindingInfoAndHost string like *:443:host.com
+                if ($bindingInfoAndHost -match '^(.+?:.+?:)(.+)$') { # Matches *:443:host.com or similar
+                    $hostHeader = $Matches[2].Trim()
                 }
-                
-                # Check for empty host header string and ensure no space
-                if ($hostHeader -eq ' ' -or $hostHeader -eq '') { $hostHeader = "" }
 
-                Write-Log "    Raw appcmd Binding - Protocol: '$protocol', Info: '$bindingInformation', Host: '$hostHeader', SslFlags: '$sslFlags'"
+                # We log the raw appcmd derived values for debugging
+                Write-Log "    Parsed appcmd Binding - Protocol: '$protocol', Info: '$bindingInformation', Host: '$hostHeader', Assumed SslFlags: '$sslFlags'"
 
                 # Now process HTTPS bindings
                 if ($protocol.ToLowerInvariant() -eq "https") {
@@ -119,18 +120,34 @@ foreach ($site in $iisWebsites) {
                     }
                     $hostHeadersProcessed[$hostHeader] = $true # Mark as processed
 
-                    # Extract IPAddress and Port from bindingInformation (e.g., *:443)
-                    $bindingInfoParts = $bindingInformation -split ':'
-                    $ipAddress = $bindingInfoParts[0]
-                    $port = [int]$bindingInfoParts[1]
-                    $numericSslFlags = [int]$sslFlags # Cast to int for cmdlets
+                    # Use Get-WebBinding to get the full binding object to determine current certificate, IP, Port, and actual SslFlags
+                    $currentWebBinding = Get-WebBinding -Name $site.Name -Protocol "https" -BindingInformation "$bindingInformation" -ErrorAction SilentlyContinue
+
+                    if ($null -eq $currentWebBinding) {
+                        Write-Log "    Could not find matching WebAdministration binding object for HTTPS binding: $bindingInformation (Host: $hostHeader). Skipping." "WARN"
+                        continue
+                    }
+
+                    # Extract actual values from the WebAdministration object as it's more reliable for these details
+                    $ipAddress = $currentWebBinding.ipAddress
+                    $port = $currentWebBinding.port
+                    $hostHeaderFromWebBinding = $currentWebBinding.Host # Use this as it's definitive
+                    $numericSslFlags = [int]$currentWebBinding.SslFlags # Use actual SslFlags from the object
+
+                    # Re-evaluate hostHeader based on the WebAdministration object, which is more reliable
+                    # For `appcmd set site`, an empty host header is just "", not a space
+                    if ([string]::IsNullOrEmpty($hostHeaderFromWebBinding)) { $hostHeaderFromWebBinding = "" }
+
+
+                    Write-Log "    Retrieved WebBinding details - IP: '$ipAddress', Port: '$port', Host: '$hostHeaderFromWebBinding', SslFlags: '$numericSslFlags'"
+
 
                     # Find the latest valid certificate for this binding.
                     $latestCert = $null
                     try {
                         $certsInStore = Get-ChildItem -Path $certStorePath | Where-Object { $_.NotAfter -gt (Get-Date) } | Sort-Object -Property NotAfter -Descending
 
-                        if ([string]::IsNullOrEmpty($hostHeader)) {
+                        if ([string]::IsNullOrEmpty($hostHeaderFromWebBinding)) {
                             # For IP-based bindings (no host header), prioritize by FriendlyName which often comes from Key Vault secret name
                             Write-Log "    Binding has no host header (IP-based). Attempting to find certificate by FriendlyName or common patterns." "INFO"
                             
@@ -154,53 +171,55 @@ foreach ($site in $iisWebsites) {
                             # For bindings with a host header, use existing logic
                             $latestCert = $certsInStore |
                                 Where-Object {
-                                    ($_.Subject -like "*CN=$hostHeader*") -or # Match CN directly
-                                    ($_.DnsNames -contains $hostHeader) -or # Match SANs
-                                    ($_.DnsNames -contains "*.$hostHeader" -and $hostHeader -notlike "www.*") -or # Match wildcard SAN for subdomain
-                                    ("www.$hostHeader" -in $_.DnsNames) # Handle www. conversion for SANs
+                                    ($_.Subject -like "*CN=$hostHeaderFromWebBinding*") -or # Match CN directly
+                                    ($_.DnsNames -contains $hostHeaderFromWebBinding) -or # Match SANs
+                                    ($_.DnsNames -contains "*.$hostHeaderFromWebBinding" -and $hostHeaderFromWebBinding -notlike "www.*") -or # Match wildcard SAN for subdomain
+                                    ("www.$hostHeaderFromWebBinding" -in $_.DnsNames) # Handle www. conversion for SANs
                                 } | Select-Object -First 1
                         }
                     } catch {
-                        Write-Log "  Error searching for certificate for host '$hostHeader': $($_.Exception.Message)" "ERROR"
+                        Write-Log "  Error searching for certificate for host '$hostHeaderFromWebBinding': $($_.Exception.Message)" "ERROR"
                         continue
                     }
 
                     if ($null -eq $latestCert) {
-                        Write-Log "  No suitable valid certificate found in '$certStorePath' for host header '$hostHeader'. Current binding will be kept as is." "WARN"
+                        Write-Log "  No suitable valid certificate found in '$certStorePath' for host header '$hostHeaderFromWebBinding'. Current binding will be kept as is." "WARN"
                         continue
                     }
 
                     Write-Log "  Found target certificate: Subject = '$($latestCert.Subject)', FriendlyName = '$($latestCert.FriendlyName)', Thumbprint = '$($latestCert.Thumbprint)', NotAfter = '$($latestCert.NotAfter)'"
 
-                    # Get current binding's certificate hash using Get-Item (WebAdministration)
-                    # We still use Get-WebBinding here because appcmd.exe's 'list' command doesn't easily expose the cert hash.
-                    # It's okay to use it here because we're only reading, not relying on complex property access.
-                    $currentBinding = Get-WebBinding -Name $site.Name -Protocol "https" -BindingInformation "$bindingInformation" -ErrorAction SilentlyContinue
+                    # Get current binding's certificate hash using Get-WebBinding directly
                     $currentCertHash = ""
-                    if ($currentBinding -and $currentBinding.Attributes["certificateHash"]) {
-                         $currentCertHash = ($currentBinding.Attributes["certificateHash"] | Select-Object -ExpandProperty Value) -as [string] | ForEach-Object { $_.Trim() }
+                    if ($currentWebBinding -and ($currentWebBinding.CertificateHash | Select-Object -ExpandProperty Value)) {
+                         $currentCertHash = ($currentWebBinding.CertificateHash | Select-Object -ExpandProperty Value) -as [string] | ForEach-Object { $_.Trim() }
                     }
 
                     # Check if the current binding uses the latest cert
                     if ($currentCertHash -ne $latestCert.Thumbprint) { 
-                        Write-Log "  Binding for host '$hostHeader' on port '$port' is using an old certificate. Updating to new thumbprint: $($latestCert.Thumbprint)" "WARN"
+                        Write-Log "  Binding for host '$hostHeaderFromWebBinding' on port '$port' is using an old certificate. Updating to new thumbprint: $($latestCert.Thumbprint)" "WARN"
                         try {
-                            # Using appcmd to update the binding. This is often more reliable than remove/add with Set-WebBinding
-                            # Construct the appcmd command using triple quotes for easier embedding of required double quotes for appcmd.
-                            # Example appcmd format: appcmd set site "MySite" /bindings.[protocol='https',bindingInformation='*:443:',hostHeader='example.com'].sslFlags:0 /bindings.[protocol='https',bindingInformation='*:443:',hostHeader='example.com'].certificateStoreName:My /bindings.[protocol='https',bindingInformation='*:443:',hostHeader='example.com'].certificateHash:THUMBPRINT
+                            # Construct the bindingInformation string for appcmd.exe, including the host header if present
+                            $appcmdBindingInformation = "$ipAddress`:$port"
+                            if (-not [string]::IsNullOrEmpty($hostHeaderFromWebBinding)) {
+                                $appcmdBindingInformation += ":$hostHeaderFromWebBinding"
+                            }
                             
-                            $appcmdCommand = "$appCmdPath set site ""$($site.Name)"" /bindings.[protocol='$protocol',bindingInformation='$bindingInformation',hostHeader='$hostHeader'].sslFlags:$numericSslFlags /bindings.[protocol='$protocol',bindingInformation='$bindingInformation',hostHeader='$hostHeader'].certificateStoreName:$($certStorePath.Split('\')[-1]) /bindings.[protocol='$protocol',bindingInformation='$bindingInformation',hostHeader='$hostHeader'].certificateHash:$($latestCert.Thumbprint)"
+                            # Construct the appcmd command using triple quotes for easier embedding of required double quotes for appcmd.
+                            # Example appcmd format: appcmd set site "MySite" /bindings.[protocol='https',bindingInformation='*:443:example.com'].sslFlags:0 /bindings.[protocol='https',bindingInformation='*:443:example.com'].certificateStoreName:My /bindings.[protocol='https',bindingInformation='*:443:example.com'].certificateHash:THUMBPRINT
+                            
+                            $appcmdCommand = "$appCmdPath set site ""$($site.Name)"" /bindings.[protocol='https',bindingInformation='$appcmdBindingInformation'].sslFlags:$numericSslFlags /bindings.[protocol='https',bindingInformation='$appcmdBindingInformation'].certificateStoreName:$($certStorePath.Split('\')[-1]) /bindings.[protocol='https',bindingInformation='$appcmdBindingInformation'].certificateHash:$($latestCert.Thumbprint)"
                             
                             Write-Log "    Executing appcmd: $appcmdCommand"
                             $appcmdResult = Invoke-Expression $appcmdCommand -ErrorAction Stop
 
                             Write-Log "    appcmd.exe update result: $($appcmdResult | Out-String)"
-                            Write-Log "    Successfully updated binding for '$hostHeader' to certificate $($latestCert.Thumbprint) using appcmd.exe."
+                            Write-Log "    Successfully updated binding for '$hostHeaderFromWebBinding' to certificate $($latestCert.Thumbprint) using appcmd.exe."
                         } catch {
-                            Write-Log "    Failed to update binding for host '$hostHeader' on website '$($site.Name)' using appcmd.exe: $($_.Exception.Message)" "ERROR"
+                            Write-Log "    Failed to update binding for host '$hostHeaderFromWebBinding' on website '$($site.Name)' using appcmd.exe: $($_.Exception.Message)" "ERROR"
                         }
                     } else {
-                        Write-Log "  Binding for host '$hostHeader' on port '$port' is already using the correct certificate. No update needed." "INFO"
+                        Write-Log "  Binding for host '$hostHeaderFromWebBinding' on port '$port' is already using the correct certificate. No update needed." "INFO"
                     }
                 }
             }
