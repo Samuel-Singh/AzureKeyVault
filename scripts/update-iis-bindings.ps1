@@ -64,23 +64,44 @@ foreach ($site in $iisWebsites) {
 
     $hostHeadersProcessed = @{} # Track host headers to avoid duplicate processing for a site
 
-    # --- UPDATED DEBUGGING BLOCK ---
+    # --- UPDATED DEBUGGING BLOCK WITH DIRECT ATTRIBUTE ACCESS ---
     Write-Log "  Dumping all raw bindings found for site '$($site.Name)':"
     $allSiteBindings = $site.Bindings
     if ($allSiteBindings.Count -eq 0) {
         Write-Log "    No bindings found for this site at all (raw collection empty)."
     } else {
         foreach ($b in $allSiteBindings) {
-            # Explicitly cast Protocol to string and trim any whitespace
-            Write-Log "    Raw Binding - Protocol: '$([string]$b.Protocol.Trim())', Info: '$([string]$b.BindingInformation.Trim())', Host: '$([string]$b.HostHeader.Trim())', Port: '$([string]$b.Port.ToString().Trim())'"
+            # Safely get property values using Attributes collection
+            # If the attribute exists, get its Value, otherwise default to empty string
+            $protocol = ($b.Attributes["protocol"] | Select-Object -ExpandProperty Value) -as [string] | Where-Object { $_ -ne $null } | ForEach-Object { $_.Trim() }
+            $bindingInformation = ($b.Attributes["bindingInformation"] | Select-Object -ExpandProperty Value) -as [string] | Where-Object { $_ -ne $null } | ForEach-Object { $_.Trim() }
+            $hostHeaderRaw = ($b.Attributes["hostHeader"] | Select-Object -ExpandProperty Value) -as [string] | Where-Object { $_ -ne $null } | ForEach-Object { $_.Trim() }
+            $portRaw = ($b.Attributes["port"] | Select-Object -ExpandProperty Value) -as [string] | Where-Object { $_ -ne $null } | ForEach-Object { $_.Trim() }
+            $sslFlagsRaw = ($b.Attributes["sslFlags"] | Select-Object -ExpandProperty Value) -as [string] | Where-Object { $_ -ne $null } | ForEach-Object { $_.Trim() }
+
+            # If properties are still null after trying to expand Value (for strange object types), default to empty string
+            $protocol = if ($protocol) { $protocol } else { "" }
+            $bindingInformation = if ($bindingInformation) { $bindingInformation } else { "" }
+            $hostHeaderRaw = if ($hostHeaderRaw) { $hostHeaderRaw } else { "" }
+            $portRaw = if ($portRaw) { $portRaw } else { "" }
+            $sslFlagsRaw = if ($sslFlagsRaw) { $sslFlagsRaw } else { "" }
+
+
+            Write-Log "    Raw Binding - Protocol: '$protocol', Info: '$bindingInformation', Host: '$hostHeaderRaw', Port: '$portRaw', SslFlags: '$sslFlagsRaw'"
         }
     }
     # --- END UPDATED DEBUGGING BLOCK ---
 
 
     # Iterate existing HTTPS bindings to check for updates
-    # Explicitly cast $_.Protocol to string and trim to avoid any type/whitespace issues
-    $httpsBindingsFound = $site.Bindings | Where-Object { ([string]$_.Protocol.Trim()) -eq "https" }
+    # Safely get Protocol property using Attributes collection and compare
+    $httpsBindingsFound = $site.Bindings | Where-Object { 
+        $protocolValue = ($_.Attributes["protocol"] | Select-Object -ExpandProperty Value) -as [string]
+        # Check if $protocolValue is not null and equals "https" after trimming
+        # ADDED VERY SPECIFIC DEBUG HERE
+        Write-Log "    DEBUG: Evaluating binding protocol. Raw value: '$($protocolValue)', Trimmed value: '$($protocolValue.Trim())'" -Level "INFO"
+        ($protocolValue -ne $null -and $protocolValue.Trim() -eq "https")
+    }
 
     # --- NEW DEBUGGING AFTER FILTERING ---
     if ($httpsBindingsFound.Count -gt 0) {
@@ -94,10 +115,25 @@ foreach ($site in $iisWebsites) {
     }
 
     foreach ($binding in $httpsBindingsFound) {
-        $hostHeader = $binding.HostHeader.ToLowerInvariant() # Normalize host header
-        
-        # Log the raw binding information for debugging
-        Write-Log "  Found existing HTTPS binding. BindingInformation: '$($binding.BindingInformation)', HostHeader: '$hostHeader', Port: '$($binding.Port)', SSLFlags: '$($binding.SslFlags)'"
+        # Safely get properties using Attributes collection
+        $hostHeader = ($binding.Attributes["hostHeader"] | Select-Object -ExpandProperty Value) -as [string]
+        $hostHeader = if ($hostHeader -ne $null) { $hostHeader.ToLowerInvariant().Trim() } else { "" } # Normalize host header
+
+        $bindingInformation = ($binding.Attributes["bindingInformation"] | Select-Object -ExpandProperty Value) -as [string]
+        $bindingInformation = if ($bindingInformation -ne $null) { $bindingInformation.Trim() } else { "" }
+
+        $port = ($binding.Attributes["port"] | Select-Object -ExpandProperty Value) -as [string]
+        $port = if ($port -ne $null) { $port.Trim() } else { "" }
+
+        $sslFlags = ($binding.Attributes["sslFlags"] | Select-Object -ExpandProperty Value) -as [string]
+        $sslFlags = if ($sslFlags -ne $null) { $sslFlags.Trim() } else { "0" } # Default to 0 if null
+
+        $certificateHash = ($binding.Attributes["certificateHash"] | Select-Object -ExpandProperty Value) -as [string]
+        $certificateHash = if ($certificateHash -ne $null) { $certificateHash.Trim() } else { "" }
+
+
+        # Log the binding information for debugging
+        Write-Log "  Found existing HTTPS binding. BindingInformation: '$bindingInformation', HostHeader: '$hostHeader', Port: '$port', SSLFlags: '$sslFlags', CertificateHash: '$certificateHash'"
 
         if ($hostHeadersProcessed.ContainsKey($hostHeader)) {
             Write-Log "  Skipping already processed host header: $hostHeader for site '$($site.Name)'" "INFO"
@@ -105,7 +141,7 @@ foreach ($site in $iisWebsites) {
         }
         $hostHeadersProcessed[$hostHeader] = $true # Mark as processed
 
-        Write-Log "  Checking binding for host: '$hostHeader' (empty means IP-based) on port: $($binding.Port)"
+        Write-Log "  Checking binding for host: '$hostHeader' (empty means IP-based) on port: $port"
 
         # Find the latest valid certificate for this binding.
         $latestCert = $null
@@ -155,28 +191,31 @@ foreach ($site in $iisWebsites) {
         Write-Log "  Found target certificate: Subject = '$($latestCert.Subject)', FriendlyName = '$($latestCert.FriendlyName)', Thumbprint = '$($latestCert.Thumbprint)', NotAfter = '$($latestCert.NotAfter)'"
 
         # Check if the current binding uses the latest cert
-        if ($binding.CertificateHash -ne $latestCert.Thumbprint) {
-            Write-Log "  Binding for host '$hostHeader' on port '$($binding.Port)' is using an old certificate. Updating to new thumbprint: $($latestCert.Thumbprint)" "WARN"
+        if ($certificateHash -ne $latestCert.Thumbprint) { # Use the safely retrieved $certificateHash
+            Write-Log "  Binding for host '$hostHeader' on port '$port' is using an old certificate. Updating to new thumbprint: $($latestCert.Thumbprint)" "WARN"
             try {
                 # Attempt to remove the old binding (important for clean update)
-                Remove-WebBinding -Name $site.Name -Protocol "https" -BindingInformation "$($binding.BindingInformation)" -ErrorAction SilentlyContinue | Out-Null
+                Remove-WebBinding -Name $site.Name -Protocol "https" -BindingInformation "$bindingInformation" -ErrorAction SilentlyContinue | Out-Null
                 Write-Log "    Old binding removed for '$hostHeader' (if it existed)."
 
-                # Add the new binding with the updated certificate
-                # For IP-based, Set-WebBinding might need the HostHeader parameter as ""
-                $finalHostHeader = if ([string]::IsNullOrEmpty($hostHeader)) { "" } else { $hostHeader }
+                # Get the actual numeric SSLFlags
+                $numericSslFlags = [int]$sslFlags 
 
-                # Use New-WebBinding with -Force to ensure it's added, then Set-WebBinding for cert.
-                # Sometimes a direct Set-WebBinding on an existing binding works, but recreating is safer if issues persist.
-                New-WebBinding -Name $site.Name -Protocol "https" -IPAddress $binding.IPAddress -Port $binding.Port -HostHeader $finalHostHeader -SslFlags $binding.SslFlags -ErrorAction Stop
-                Set-WebBinding -Name $site.Name -Protocol "https" -HostHeader $finalHostHeader -IPAddress $binding.IPAddress -Port $binding.Port -SslFlags $binding.SslFlags -CertificateThumbprint $latestCert.Thumbprint -CertificateStoreName $certStorePath.Split('\')[-1] -ErrorAction Stop
+                # Re-add binding with updated cert. Need to use original object's IPAddress and Port
+                # It seems some properties are direct, others are attributes. This is confusing.
+                # Let's try to get IPAddress and Port from the 'Attributes' as well, for consistency
+                $ipAddressForBinding = ($binding.Attributes["ipAddress"] | Select-Object -ExpandProperty Value) -as [string]
+                $portForBinding = ($binding.Attributes["port"] | Select-Object -ExpandProperty Value) -as [int] # Cast to int for port
+
+                New-WebBinding -Name $site.Name -Protocol "https" -IPAddress $ipAddressForBinding -Port $portForBinding -HostHeader $finalHostHeader -SslFlags $numericSslFlags -ErrorAction Stop
+                Set-WebBinding -Name $site.Name -Protocol "https" -HostHeader $finalHostHeader -IPAddress $ipAddressForBinding -Port $portForBinding -SslFlags $numericSslFlags -CertificateThumbprint $latestCert.Thumbprint -CertificateStoreName $certStorePath.Split('\')[-1] -ErrorAction Stop
 
                 Write-Log "    Successfully updated binding for '$hostHeader' to certificate $($latestCert.Thumbprint)."
             } catch {
                 Write-Log "    Failed to update binding for host '$hostHeader' on website '$($site.Name)': $($_.Exception.Message)" "ERROR"
             }
         } else {
-            Write-Log "  Binding for host '$hostHeader' on port '$($binding.Port)' is already using the correct certificate. No update needed." "INFO"
+            Write-Log "  Binding for host '$hostHeader' on port '$port' is already using the correct certificate. No update needed." "INFO"
         }
     }
 }
