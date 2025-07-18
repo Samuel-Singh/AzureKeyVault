@@ -17,7 +17,8 @@
     - For bindings with no host header (IP-based SSL), it will attempt to find a certificate
       where its CN matches the website's name, or a general purpose certificate.
     - It prefers SNI (Server Name Indication) bindings (SslFlags = 0).
-    - Requires the WebAdministration PowerShell module (IIS Management Tools installed).
+    - This version uses appcmd.exe for more robust binding detection and update due to
+      observed inconsistencies with WebAdministration module property access.
 #>
 
 # Function to log messages with timestamp
@@ -32,7 +33,7 @@ function Write-Log {
 
 Write-Log "Starting IIS SSL Binding Update Script (Existing Bindings Only)..."
 
-#region Module Check
+#region Module Check (Still useful for Set-WebBinding cmdlets if needed later)
 # Import WebAdministration module if not already loaded
 if (-not (Get-Module -ListAvailable -Name WebAdministration)) {
     Write-Log "WebAdministration module not found. Attempting to install if possible." "WARN"
@@ -42,6 +43,14 @@ try {
     Write-Log "WebAdministration module imported successfully."
 } catch {
     Write-Log "Failed to import WebAdministration module. Please ensure IIS Management Tools are installed on this VM." "ERROR"
+    exit 1
+}
+#endregion
+
+#region AppCmd Path
+$appCmdPath = "$env:SystemRoot\System32\inetsrv\appcmd.exe"
+if (-not (Test-Path $appCmdPath)) {
+    Write-Log "appcmd.exe not found at '$appCmdPath'. Cannot proceed with binding updates." "ERROR"
     exit 1
 }
 #endregion
@@ -64,158 +73,138 @@ foreach ($site in $iisWebsites) {
 
     $hostHeadersProcessed = @{} # Track host headers to avoid duplicate processing for a site
 
-    # --- UPDATED DEBUGGING BLOCK WITH DIRECT ATTRIBUTE ACCESS ---
-    Write-Log "  Dumping all raw bindings found for site '$($site.Name)':"
-    $allSiteBindings = $site.Bindings
-    if ($allSiteBindings.Count -eq 0) {
-        Write-Log "    No bindings found for this site at all (raw collection empty)."
+    Write-Log "  Using appcmd.exe to dump all raw bindings for site '$($site.Name)':"
+    # Get all bindings for the site using appcmd.exe
+    # Output format is "protocol/bindingInformation:hostHeader"
+    $appCmdBindingsRaw = (&$appCmdPath list site "$($site.Name)" /config /text:bindings) -split ' ' | Where-Object { $_ -match '^(.+?)/(.+)$' }
+
+    if ($appCmdBindingsRaw.Count -eq 0) {
+        Write-Log "    No bindings found for this site at all via appcmd.exe."
     } else {
-        foreach ($b in $allSiteBindings) {
-            # Safely get property values using Attributes collection
-            # If the attribute exists, get its Value, otherwise default to empty string
-            $protocol = ($b.Attributes["protocol"] | Select-Object -ExpandProperty Value) -as [string] | Where-Object { $_ -ne $null } | ForEach-Object { $_.Trim() }
-            $bindingInformation = ($b.Attributes["bindingInformation"] | Select-Object -ExpandProperty Value) -as [string] | Where-Object { $_ -ne $null } | ForEach-Object { $_.Trim() }
-            $hostHeaderRaw = ($b.Attributes["hostHeader"] | Select-Object -ExpandProperty Value) -as [string] | Where-Object { $_ -ne $null } | ForEach-Object { $_.Trim() }
-            $portRaw = ($b.Attributes["port"] | Select-Object -ExpandProperty Value) -as [string] | Where-Object { $_ -ne $null } | ForEach-Object { $_.Trim() }
-            $sslFlagsRaw = ($b.Attributes["sslFlags"] | Select-Object -ExpandProperty Value) -as [string] | Where-Object { $_ -ne $null } | ForEach-Object { $_.Trim() }
+        foreach ($bindingString in $appCmdBindingsRaw) {
+            # Extract protocol and bindingInformation part
+            if ($bindingString -match '^(.+?)/(.+)$') {
+                $protocol = $Matches[1]
+                $bindingInfoAndHost = $Matches[2]
 
-            # If properties are still null after trying to expand Value (for strange object types), default to empty string
-            $protocol = if ($protocol) { $protocol } else { "" }
-            $bindingInformation = if ($bindingInformation) { $bindingInformation } else { "" }
-            $hostHeaderRaw = if ($hostHeaderRaw) { $hostHeaderRaw } else { "" }
-            $portRaw = if ($portRaw) { $portRaw } else { "" }
-            $sslFlagsRaw = if ($sslFlagsRaw) { $sslFlagsRaw } else { "" }
+                # Extract bindingInformation, hostHeader and potential sslFlags from bindingInfoAndHost
+                # Example: *:443:host.com or *:443: or *:443: sslFlags=0
+                $bindingParts = $bindingInfoAndHost -split ':'
+                $bindingInformation = ($bindingParts | Select-Object -First 2) -join ':' # e.g., *:443
+                $hostHeader = ""
+                $sslFlags = "0" # Default
 
-
-            Write-Log "    Raw Binding - Protocol: '$protocol', Info: '$bindingInformation', Host: '$hostHeaderRaw', Port: '$portRaw', SslFlags: '$sslFlagsRaw'"
-        }
-    }
-    # --- END UPDATED DEBUGGING BLOCK ---
-
-
-    # Iterate existing HTTPS bindings to check for updates
-    # Safely get Protocol property using Attributes collection and compare
-    $httpsBindingsFound = $site.Bindings | Where-Object { 
-        $protocolValue = ($_.Attributes["protocol"] | Select-Object -ExpandProperty Value) -as [string]
-        # Check if $protocolValue is not null and equals "https" after trimming
-        # ADDED VERY SPECIFIC DEBUG HERE
-        Write-Log "    DEBUG: Evaluating binding protocol. Raw value: '$($protocolValue)', Trimmed value: '$($protocolValue.Trim())'" -Level "INFO"
-        ($protocolValue -ne $null -and $protocolValue.Trim() -eq "https")
-    }
-
-    # --- NEW DEBUGGING AFTER FILTERING ---
-    if ($httpsBindingsFound.Count -gt 0) {
-        Write-Log "  After filtering, found $($httpsBindingsFound.Count) HTTPS binding(s) for site '$($site.Name)'."
-    }
-    # --- END NEW DEBUGGING AFTER FILTERING ---
-
-    if ($httpsBindingsFound.Count -eq 0) {
-        Write-Log "  Website '$($site.Name)' has no existing HTTPS bindings to update. Skipping." "INFO"
-        continue # Move to the next website
-    }
-
-    foreach ($binding in $httpsBindingsFound) {
-        # Safely get properties using Attributes collection
-        $hostHeader = ($binding.Attributes["hostHeader"] | Select-Object -ExpandProperty Value) -as [string]
-        $hostHeader = if ($hostHeader -ne $null) { $hostHeader.ToLowerInvariant().Trim() } else { "" } # Normalize host header
-
-        $bindingInformation = ($binding.Attributes["bindingInformation"] | Select-Object -ExpandProperty Value) -as [string]
-        $bindingInformation = if ($bindingInformation -ne $null) { $bindingInformation.Trim() } else { "" }
-
-        $port = ($binding.Attributes["port"] | Select-Object -ExpandProperty Value) -as [string]
-        $port = if ($port -ne $null) { $port.Trim() } else { "" }
-
-        $sslFlags = ($binding.Attributes["sslFlags"] | Select-Object -ExpandProperty Value) -as [string]
-        $sslFlags = if ($sslFlags -ne $null) { $sslFlags.Trim() } else { "0" } # Default to 0 if null
-
-        $certificateHash = ($binding.Attributes["certificateHash"] | Select-Object -ExpandProperty Value) -as [string]
-        $certificateHash = if ($certificateHash -ne $null) { $certificateHash.Trim() } else { "" }
-
-
-        # Log the binding information for debugging
-        Write-Log "  Found existing HTTPS binding. BindingInformation: '$bindingInformation', HostHeader: '$hostHeader', Port: '$port', SSLFlags: '$sslFlags', CertificateHash: '$certificateHash'"
-
-        if ($hostHeadersProcessed.ContainsKey($hostHeader)) {
-            Write-Log "  Skipping already processed host header: $hostHeader for site '$($site.Name)'" "INFO"
-            continue
-        }
-        $hostHeadersProcessed[$hostHeader] = $true # Mark as processed
-
-        Write-Log "  Checking binding for host: '$hostHeader' (empty means IP-based) on port: $port"
-
-        # Find the latest valid certificate for this binding.
-        $latestCert = $null
-        try {
-            $certsInStore = Get-ChildItem -Path $certStorePath | Where-Object { $_.NotAfter -gt (Get-Date) } | Sort-Object -Property NotAfter -Descending
-
-            if ([string]::IsNullOrEmpty($hostHeader)) {
-                # For IP-based bindings (no host header), prioritize by FriendlyName which often comes from Key Vault secret name
-                Write-Log "    Binding has no host header (IP-based). Attempting to find certificate by FriendlyName or common patterns." "INFO"
-                
-                # First, try to find a cert whose FriendlyName matches "IIS-Key-Vault" or similar pattern
-                # IMPORTANT: Replace "IIS-Key-Vault" below with the actual FriendlyName of your certificate if it's different.
-                # You can find this in certlm.msc on the VM in the Personal -> Certificates store.
-                $latestCert = $certsInStore | Where-Object { 
-                    ($_.FriendlyName -like "*IIS-Key-Vault*") -or # Matches if FriendlyName contains "IIS-Key-Vault"
-                    ($_.Subject -like "*CN=$($site.Name)*") -or # Matches CN of cert to site name
-                    ($_.DnsNames -contains $site.Name) # Matches SAN of cert to site name
-                } | Select-Object -First 1
-
-                if ($null -eq $latestCert) {
-                    Write-Log "    Specific certificate for IP-based binding for site '$($site.Name)' not found by friendly name or CN/SAN. Trying to find a general latest valid cert in the store." "WARN"
-                    # Fallback: if no specific match, just pick the overall newest valid certificate.
-                    # This fallback is less precise but might work if only one relevant cert is present.
-                    $latestCert = $certsInStore | Select-Object -First 1
+                if ($bindingParts.Count -gt 2) {
+                    $potentialHostOrFlags = ($bindingParts | Select-Object -Skip 2) -join ':'
+                    if ($potentialHostOrFlags -match '^(.*?)\s*sslFlags=(\d+)$') {
+                        $hostHeader = $Matches[1].Trim()
+                        $sslFlags = $Matches[2]
+                    } else {
+                        $hostHeader = $potentialHostOrFlags.Trim()
+                    }
                 }
                 
-            } else {
-                # For bindings with a host header, use existing logic
-                $latestCert = $certsInStore |
-                    Where-Object {
-                        ($_.Subject -like "*CN=$hostHeader*") -or # Match CN directly
-                        ($_.DnsNames -contains $hostHeader) -or # Match SANs
-                        ($_.DnsNames -contains "*.$hostHeader" -and $hostHeader -notlike "www.*") -or # Match wildcard SAN for subdomain
-                        ("www.$hostHeader" -in $_.DnsNames) # Handle www. conversion for SANs
-                    } | Select-Object -First 1
+                # Check for empty host header string and ensure no space
+                if ($hostHeader -eq ' ' -or $hostHeader -eq '') { $hostHeader = "" }
+
+                Write-Log "    Raw appcmd Binding - Protocol: '$protocol', Info: '$bindingInformation', Host: '$hostHeader', SslFlags: '$sslFlags'"
+
+                # Now process HTTPS bindings
+                if ($protocol.ToLowerInvariant() -eq "https") {
+                    Write-Log "  Found existing HTTPS binding for host: '$hostHeader' on port: '$bindingInformation' via appcmd."
+
+                    if ($hostHeadersProcessed.ContainsKey($hostHeader)) {
+                        Write-Log "  Skipping already processed host header: $hostHeader for site '$($site.Name)'" "INFO"
+                        continue
+                    }
+                    $hostHeadersProcessed[$hostHeader] = $true # Mark as processed
+
+                    # Extract IPAddress and Port from bindingInformation (e.g., *:443)
+                    $bindingInfoParts = $bindingInformation -split ':'
+                    $ipAddress = $bindingInfoParts[0]
+                    $port = [int]$bindingInfoParts[1]
+                    $numericSslFlags = [int]$sslFlags # Cast to int for cmdlets
+
+                    # Find the latest valid certificate for this binding.
+                    $latestCert = $null
+                    try {
+                        $certsInStore = Get-ChildItem -Path $certStorePath | Where-Object { $_.NotAfter -gt (Get-Date) } | Sort-Object -Property NotAfter -Descending
+
+                        if ([string]::IsNullOrEmpty($hostHeader)) {
+                            # For IP-based bindings (no host header), prioritize by FriendlyName which often comes from Key Vault secret name
+                            Write-Log "    Binding has no host header (IP-based). Attempting to find certificate by FriendlyName or common patterns." "INFO"
+                            
+                            # First, try to find a cert whose FriendlyName matches "IIS-Key-Vault" or similar pattern
+                            # IMPORTANT: Replace "IIS-Key-Vault" below with the actual FriendlyName of your certificate if it's different.
+                            # You can find this in certlm.msc on the VM in the Personal -> Certificates store.
+                            $latestCert = $certsInStore | Where-Object { 
+                                ($_.FriendlyName -like "*IIS-Key-Vault*") -or # Matches if FriendlyName contains "IIS-Key-Vault"
+                                ($_.Subject -like "*CN=$($site.Name)*") -or # Matches CN of cert to site name
+                                ($_.DnsNames -contains $site.Name) # Matches SAN of cert to site name
+                            } | Select-Object -First 1
+
+                            if ($null -eq $latestCert) {
+                                Write-Log "    Specific certificate for IP-based binding for site '$($site.Name)' not found by friendly name or CN/SAN. Trying to find a general latest valid cert in the store." "WARN"
+                                # Fallback: if no specific match, just pick the overall newest valid certificate.
+                                # This fallback is less precise but might work if only one relevant cert is present.
+                                $latestCert = $certsInStore | Select-Object -First 1
+                            }
+                            
+                        } else {
+                            # For bindings with a host header, use existing logic
+                            $latestCert = $certsInStore |
+                                Where-Object {
+                                    ($_.Subject -like "*CN=$hostHeader*") -or # Match CN directly
+                                    ($_.DnsNames -contains $hostHeader) -or # Match SANs
+                                    ($_.DnsNames -contains "*.$hostHeader" -and $hostHeader -notlike "www.*") -or # Match wildcard SAN for subdomain
+                                    ("www.$hostHeader" -in $_.DnsNames) # Handle www. conversion for SANs
+                                } | Select-Object -First 1
+                        }
+                    } catch {
+                        Write-Log "  Error searching for certificate for host '$hostHeader': $($_.Exception.Message)" "ERROR"
+                        continue
+                    }
+
+                    if ($null -eq $latestCert) {
+                        Write-Log "  No suitable valid certificate found in '$certStorePath' for host header '$hostHeader'. Current binding will be kept as is." "WARN"
+                        continue
+                    }
+
+                    Write-Log "  Found target certificate: Subject = '$($latestCert.Subject)', FriendlyName = '$($latestCert.FriendlyName)', Thumbprint = '$($latestCert.Thumbprint)', NotAfter = '$($latestCert.NotAfter)'"
+
+                    # Get current binding's certificate hash using Get-Item (WebAdministration)
+                    $currentBinding = Get-WebBinding -Name $site.Name -Protocol "https" -BindingInformation "$bindingInformation" -ErrorAction SilentlyContinue
+                    $currentCertHash = ""
+                    if ($currentBinding -and ($currentBinding.CertificateHash | Select-Object -ExpandProperty Value)) {
+                         $currentCertHash = ($currentBinding.CertificateHash | Select-Object -ExpandProperty Value) -as [string] | ForEach-Object { $_.Trim() }
+                    }
+
+                    # Check if the current binding uses the latest cert
+                    if ($currentCertHash -ne $latestCert.Thumbprint) { 
+                        Write-Log "  Binding for host '$hostHeader' on port '$port' is using an old certificate. Updating to new thumbprint: $($latestCert.Thumbprint)" "WARN"
+                        try {
+                            # Using appcmd to update the binding. This is often more reliable than remove/add with Set-WebBinding
+                            # For appcmd, the format is "protocol/bindingInformation" and then attributes
+                            $appcmdBindingId = "$protocol/$bindingInformation"
+                            if (-not [string]::IsNullOrEmpty($hostHeader)) {
+                                $appcmdBindingId += ":$hostHeader"
+                            }
+                            
+                            $appcmdCommand = "$appCmdPath set site /site.name:\"$($site.Name)\" /bindings.[protocol='$protocol',bindingInformation='$bindingInformation',hostHeader='$hostHeader'].sslFlags:$numericSslFlags /bindings.[protocol='$protocol',bindingInformation='$bindingInformation',hostHeader='$hostHeader'].certificateStoreName:$($certStorePath.Split('\')[-1]) /bindings.[protocol='$protocol',bindingInformation='$bindingInformation',hostHeader='$hostHeader'].certificateHash:$($latestCert.Thumbprint)"
+                            
+                            Write-Log "    Executing appcmd: $appcmdCommand"
+                            $appcmdResult = Invoke-Expression $appcmdCommand -ErrorAction Stop
+
+                            Write-Log "    appcmd.exe update result: $($appcmdResult | Out-String)"
+                            Write-Log "    Successfully updated binding for '$hostHeader' to certificate $($latestCert.Thumbprint) using appcmd.exe."
+                        } catch {
+                            Write-Log "    Failed to update binding for host '$hostHeader' on website '$($site.Name)' using appcmd.exe: $($_.Exception.Message)" "ERROR"
+                        }
+                    } else {
+                        Write-Log "  Binding for host '$hostHeader' on port '$port' is already using the correct certificate. No update needed." "INFO"
+                    }
+                }
             }
-        } catch {
-            Write-Log "  Error searching for certificate for host '$hostHeader': $($_.Exception.Message)" "ERROR"
-            continue
-        }
-
-        if ($null -eq $latestCert) {
-            Write-Log "  No suitable valid certificate found in '$certStorePath' for host header '$hostHeader'. Current binding will be kept as is." "WARN"
-            continue
-        }
-
-        Write-Log "  Found target certificate: Subject = '$($latestCert.Subject)', FriendlyName = '$($latestCert.FriendlyName)', Thumbprint = '$($latestCert.Thumbprint)', NotAfter = '$($latestCert.NotAfter)'"
-
-        # Check if the current binding uses the latest cert
-        if ($certificateHash -ne $latestCert.Thumbprint) { # Use the safely retrieved $certificateHash
-            Write-Log "  Binding for host '$hostHeader' on port '$port' is using an old certificate. Updating to new thumbprint: $($latestCert.Thumbprint)" "WARN"
-            try {
-                # Attempt to remove the old binding (important for clean update)
-                Remove-WebBinding -Name $site.Name -Protocol "https" -BindingInformation "$bindingInformation" -ErrorAction SilentlyContinue | Out-Null
-                Write-Log "    Old binding removed for '$hostHeader' (if it existed)."
-
-                # Get the actual numeric SSLFlags
-                $numericSslFlags = [int]$sslFlags 
-
-                # Re-add binding with updated cert. Need to use original object's IPAddress and Port
-                # It seems some properties are direct, others are attributes. This is confusing.
-                # Let's try to get IPAddress and Port from the 'Attributes' as well, for consistency
-                $ipAddressForBinding = ($binding.Attributes["ipAddress"] | Select-Object -ExpandProperty Value) -as [string]
-                $portForBinding = ($binding.Attributes["port"] | Select-Object -ExpandProperty Value) -as [int] # Cast to int for port
-
-                New-WebBinding -Name $site.Name -Protocol "https" -IPAddress $ipAddressForBinding -Port $portForBinding -HostHeader $finalHostHeader -SslFlags $numericSslFlags -ErrorAction Stop
-                Set-WebBinding -Name $site.Name -Protocol "https" -HostHeader $finalHostHeader -IPAddress $ipAddressForBinding -Port $portForBinding -SslFlags $numericSslFlags -CertificateThumbprint $latestCert.Thumbprint -CertificateStoreName $certStorePath.Split('\')[-1] -ErrorAction Stop
-
-                Write-Log "    Successfully updated binding for '$hostHeader' to certificate $($latestCert.Thumbprint)."
-            } catch {
-                Write-Log "    Failed to update binding for host '$hostHeader' on website '$($site.Name)': $($_.Exception.Message)" "ERROR"
-            }
-        } else {
-            Write-Log "  Binding for host '$hostHeader' on port '$port' is already using the correct certificate. No update needed." "INFO"
         }
     }
 }
