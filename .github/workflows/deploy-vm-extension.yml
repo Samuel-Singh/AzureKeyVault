@@ -1,11 +1,11 @@
-name: Deploy VM Key Vault Extension
+name: Deploy Azure Key Vault Extension
 
 on:
-# push:
-# branches:
-# - main
-# paths:
-# - 'bicep/**' # Trigger if any bicep file (including param files) changes
+#  push:
+#    branches:
+#      - main
+#    paths:
+#      - 'bicep/**' # Trigger if any bicep file (including param files) changes
   workflow_dispatch: # Allow manual triggering from GitHub UI
 
 env:
@@ -35,10 +35,9 @@ jobs:
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }} # GitHub Secret containing your Service Principal JSON
 
-      - name: Extract VM Name and Resource Group
-        id: extract_params # Renamed for clarity as it no longer extracts *all* params
+      - name: Extract Parameters from ${{ matrix.vm_params_file }}
+        id: extract_params
         run: |
-          # Only extract VM_NAME and RESOURCE_GROUP for workflow variables
           VM_NAME=$(jq -r '.parameters.vmName.value' "${{ matrix.vm_params_file }}")
           RESOURCE_GROUP=$(jq -r '.parameters.resourceGroupName.value' "${{ matrix.vm_params_file }}")
           
@@ -47,14 +46,17 @@ jobs:
         shell: bash
 
       - name: Deploy VM Key Vault Extension for ${{ steps.extract_params.outputs.VM_NAME }}
-        run: |
-          az deployment group create \
-            --resource-group ${{ steps.extract_params.outputs.RESOURCE_GROUP }} \
-            --template-file ${{ env.BICEP_FILE_PATH }} \
-            --parameters @${{ matrix.vm_params_file }} \
-            --name deploy-kv-ext-${{ steps.extract_params.outputs.VM_NAME }}-${{ github.run_id }} \
-            --query properties.provisioningState # Optional: get the provisioning state
-        shell: bash
+        uses: azure/arm-deploy@v2 # Using @v2 is generally preferred for the latest features/fixes
+        id: arm_deploy # Add an ID to this step to check its outcome
+        with:
+          subscriptionId: ${{ secrets.AZURE_SUBSCRIPTION_ID || fromJson(secrets.AZURE_CREDENTIALS).subscriptionId }}
+          resourceGroupName: ${{ steps.extract_params.outputs.RESOURCE_GROUP }} # Dynamic Resource Group
+          template: ${{ env.BICEP_FILE_PATH }}
+          parameters: ${{ matrix.vm_params_file }} # Use the matrix variable here
+          deploymentName: deploy-kv-ext-${{ steps.extract_params.outputs.VM_NAME }}-${{ github.run_id }}
+          failOnStdErr: false # Keep this to explicitly ignore non-critical stderr output
+          # continue-on-error is handled by strategy.fail-fast: false at the job level
+          # and checking the step outcome in the next step.
           
       - name: Check Deployment Result for ${{ steps.extract_params.outputs.VM_NAME }}
         if: ${{ steps.arm_deploy.outcome != 'success' }} # This step runs ONLY if the deployment step did NOT succeed
