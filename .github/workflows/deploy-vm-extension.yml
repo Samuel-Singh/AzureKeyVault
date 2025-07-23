@@ -1,11 +1,11 @@
 name: Deploy VM Key Vault Extension
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - 'bicep/**' # Trigger if any bicep file (including param files) changes
+#  push:
+#    branches:
+#      - main
+#    paths:
+#      - 'bicep/**' # Trigger if any bicep file (including param files) changes
   workflow_dispatch: # Allow manual triggering from GitHub UI
 
 env:
