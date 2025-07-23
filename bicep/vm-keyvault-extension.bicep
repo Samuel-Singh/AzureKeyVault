@@ -42,33 +42,3 @@ resource keyVaultExtension 'Microsoft.Compute/virtualMachines/extensions@2023-09
     }
   }
 }
-
-// --- Custom Script Extension for IIS Binding ---
-resource iisBindingScriptExtension 'Microsoft.Compute/virtualMachines/extensions@2023-09-01' = {
-  // Use a GUID based on VM name and script URI for uniqueness and re-deployment if script changes
-  name: 'iisBindingScript-${guid(vmName, iisScriptFileUri)}' 
-  parent: vm
-  location: location
-  
-  // CORRECT PLACEMENT for dependsOn: Direct under the resource, not inside 'properties'
-  dependsOn: [
-    keyVaultExtension
-  ]
-
-  properties: {
-    publisher: 'Microsoft.Compute'
-    type: 'CustomScriptExtension'
-    typeHandlerVersion: '1.9' // For Windows VMs, typically 1.9 or later
-    autoUpgradeMinorVersion: true
-    
-    // Use the new parameter here
-    forceUpdateTag: forceIisScriptUpdateTag // Now references the parameter
-
-    settings: {
-      fileUris: [
-        iisScriptFileUri
-      ]
-      commandToExecute: 'powershell.exe -ExecutionPolicy Unrestricted -File ${last(split(iisScriptFileUri, '/'))}'
-    }
-  }
-}
