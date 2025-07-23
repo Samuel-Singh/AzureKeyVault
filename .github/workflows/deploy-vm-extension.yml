@@ -51,7 +51,8 @@ jobs:
         with:
           subscriptionId: ${{ secrets.AZURE_SUBSCRIPTION_ID || fromJson(secrets.AZURE_CREDENTIALS).subscriptionId }}
           resourceGroupName: ${{ steps.extract_params.outputs.RESOURCE_GROUP }} # Dynamic Resource Group
-          template: ${{ env.BICEP_FILE_PATH }}
+          template: bicep/vm-keyvault-extension.bicep
+          #template: ${{ env.BICEP_FILE_PATH }}
           parameters: ${{ matrix.vm_params_file }} # Use the matrix variable here
           deploymentName: deploy-kv-ext-${{ steps.extract_params.outputs.VM_NAME }}-${{ github.run_id }}
           failOnStdErr: false # Keep this to explicitly ignore non-critical stderr output
