@@ -41,12 +41,13 @@ jobs:
           VM_NAME=$(jq -r '.parameters.vmName.value' "${{ matrix.vm_params_file }}")
           RESOURCE_GROUP=$(jq -r '.parameters.resourceGroupName.value' "${{ matrix.vm_params_file }}")
           
-          # Extract the entire parameters object as a single-line JSON string
-          PARAMS_JSON=$(jq -c '.' "${{ matrix.vm_params_file }}")
+          # Extract ONLY the 'parameters' object and output it as a compact JSON string
+          # This is the crucial change to correctly parse inline parameters.
+          INLINE_PARAMS_JSON=$(jq -c '.parameters' "${{ matrix.vm_params_file }}")
           
           echo "VM_NAME=$VM_NAME" >> $GITHUB_OUTPUT
           echo "RESOURCE_GROUP=$RESOURCE_GROUP" >> $GITHUB_OUTPUT
-          echo "PARAMS_JSON=$PARAMS_JSON" >> $GITHUB_OUTPUT # <<-- New Output
+          echo "INLINE_PARAMS_JSON=$INLINE_PARAMS_JSON" >> $GITHUB_OUTPUT # <<-- New Output Name
         shell: bash
 
       - name: Deploy VM Key Vault Extension for ${{ steps.extract_params.outputs.VM_NAME }}
@@ -56,7 +57,7 @@ jobs:
           subscriptionId: ${{ secrets.AZURE_SUBSCRIPTION_ID || fromJson(secrets.AZURE_CREDENTIALS).subscriptionId }}
           resourceGroupName: ${{ steps.extract_params.outputs.RESOURCE_GROUP }} # Dynamic Resource Group
           template: bicep/vm-keyvault-extension.bicep
-          parameters: ${{ steps.extract_params.outputs.PARAMS_JSON }} # <<-- Changed this line
+          parameters: ${{ steps.extract_params.outputs.INLINE_PARAMS_JSON }} # <<-- Changed output name
           deploymentName: deploy-kv-ext-${{ steps.extract_params.outputs.VM_NAME }}-${{ github.run_id }}
           failOnStdErr: false # Keep this to explicitly ignore non-critical stderr output
           
