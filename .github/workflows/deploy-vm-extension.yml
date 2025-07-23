@@ -1,17 +1,17 @@
 name: Deploy VM Key Vault Extension
 
 on:
-  workflow_dispatch: # Allow manual triggering from GitHub UI
+  workflow_dispatch:
 
 env:
   BICEP_FILE_PATH: bicep/vm-keyvault-extension.bicep
 
 jobs:
   deploy:
-    runs-on: ubuntu-22.04 # Use a specific Ubuntu LTS runner for stability
+    runs-on: ubuntu-22.04
 
     strategy:
-      fail-fast: false # This is CRITICAL. It ensures that if one job fails, others still run.
+      fail-fast: false
       matrix:
         vm_params_file:
           - 'bicep/Virtual-Machines/SamuelKV-VM-params.json'
@@ -28,11 +28,8 @@ jobs:
       - name: Extract VM Name, Resource Group, and Parameters JSON
         id: extract_params
         run: |
-          # Extract VM Name and Resource Group
           VM_NAME=$(jq -r '.parameters.vmName.value' "${{ matrix.vm_params_file }}")
           RESOURCE_GROUP=$(jq -r '.parameters.resourceGroupName.value' "${{ matrix.vm_params_file }}")
-          
-          # Extract ONLY the '.parameters' object and output it as a compact JSON string.
           INLINE_PARAMS_JSON=$(jq -c '.parameters' "${{ matrix.vm_params_file }}")
           
           echo "VM_NAME=$VM_NAME" >> $GITHUB_OUTPUT
@@ -42,9 +39,6 @@ jobs:
 
       - name: Deploy VM Key Vault Extension for ${{ steps.extract_params.outputs.VM_NAME }}
         run: |
-          # Use the extracted JSON string directly with az deployment group create
-          # CRITICAL: Wrap the entire ${{ steps.extract_params.outputs.INLINE_PARAMS_JSON }}
-          # in single quotes (') to ensure it's passed as a literal string to the shell.
           az deployment group create \
             --resource-group "${{ steps.extract_params.outputs.RESOURCE_GROUP }}" \
             --template-file "${{ env.BICEP_FILE_PATH }}" \
