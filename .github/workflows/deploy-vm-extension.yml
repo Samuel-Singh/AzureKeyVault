@@ -40,7 +40,7 @@ jobs:
       - name: Deploy VM Key Vault Extension for ${{ steps.extract_params.outputs.VM_NAME }}
         run: |
           az deployment group create \
-            --resource-group "${{ steps.extract_params.outputs.RESOURCE_GROUP }}" \
+            --resource-group "${{ steps.extract_params.outputs.RESOURCE_GROUP }}" \ # <--- Make sure this line correctly uses the output variable
             --template-file "${{ env.BICEP_FILE_PATH }}" \
             --parameters '${{ steps.extract_params.outputs.INLINE_PARAMS_JSON }}' \
             --name "deploy-kv-ext-${{ steps.extract_params.outputs.VM_NAME }}-${{ github.run_id }}" \
