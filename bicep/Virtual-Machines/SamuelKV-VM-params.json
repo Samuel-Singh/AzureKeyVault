@@ -8,10 +8,6 @@
     "location": {
       "value": "southcentralus"
     },
-    ## REMOVE THIS BLOCK if resourceGroupName is only used by the GitHub Action, not the Bicep template.
-    ## "resourceGroupName": {
-    ##   "value": "Samuel_KeyVault_RG"
-    ## },
     "observedCertificates": {
       "value": [
         {
@@ -31,9 +27,5 @@
         }
       ]
     }
-    ## REMOVE THIS ENTIRE BLOCK if iisScriptFileUri is not used by the Bicep template.
-    ## "iisScriptFileUri": {
-    ##   "value": "https://raw.githubusercontent.com/Samuel-Singh/AzureKeyVault/refs/heads/main/scripts/update-iis-bindings.ps1"
-    ## }
   }
 }
