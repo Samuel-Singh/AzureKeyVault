@@ -1,4 +1,4 @@
-name: Deploy VM Key Vault Extension
+name: Deploy Azure Key Vault Extension
 
 on:
 #  push:
