@@ -53,6 +53,7 @@ jobs:
             --parameters @${{ matrix.vm_params_file }} \
             --name deploy-kv-ext-${{ steps.extract_params.outputs.VM_NAME }}-${{ github.run_id }} \
             --query properties.provisioningState # Optional: get the provisioning state
+            --debug # <--- Add this line
         shell: bash
           
       - name: Check Deployment Result for ${{ steps.extract_params.outputs.VM_NAME }}
