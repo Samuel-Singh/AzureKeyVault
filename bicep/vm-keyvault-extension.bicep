@@ -6,12 +6,6 @@ param resourceGroupName string // The resource group where your VM exists
 // This is the core parameter that will hold your list of certificates for the KV extension
 param observedCertificates array = [] 
 
-// PARAMETER for Custom Script Extension
-param iisScriptFileUri string // URI to the PowerShell script (e.g., raw GitHub URL or Blob Storage SAS URL)
-
-// NEW PARAMETER: To force Custom Script Extension re-execution
-param forceIisScriptUpdateTag string = newGuid() // Use newGuid() as a default value here
-
 // --- Existing VM Resource Reference ---
 resource vm 'Microsoft.Compute/virtualMachines@2024-11-01' existing = {
   name: vmName
