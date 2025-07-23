@@ -1,10 +1,10 @@
 // Define parameters for your deployment
-param vmName string        // The name of your existing VM
-param location string      // The location of your existing VM
-param resourceGroupName string // The resource group where your VM exists
+param vmName string     // The name of your existing VM
+param location string   // The location of your existing VM
+// param resourceGroupName string // The resource group where your VM exists -- REMOVE THIS LINE
 
 // This is the core parameter that will hold your list of certificates for the KV extension
-param observedCertificates array = [] 
+param observedCertificates array = []
 
 // --- Existing VM Resource Reference ---
 resource vm 'Microsoft.Compute/virtualMachines@2024-11-01' existing = {
