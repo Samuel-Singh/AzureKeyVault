@@ -35,33 +35,21 @@ jobs:
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }} # GitHub Secret containing your Service Principal JSON
 
-      - name: Read Parameter File Content
-        id: read_params_file
-        run: |
-          # Read the entire content of the parameter file into a string
-          # And make it available as an output.
-          PARAMS_CONTENT=$(cat "${{ matrix.vm_params_file }}")
-          echo "PARAMS_CONTENT=$PARAMS_CONTENT" >> $GITHUB_OUTPUT
-        shell: bash
-
       - name: Extract Parameters for Deployment
         id: extract_params
         run: |
-          # Parse the PARAMS_CONTENT string as JSON, then extract the 'parameters' object
-          # and convert it back to a compact JSON string.
-          # This ensures that the JSON is handled correctly by GitHub Actions expressions.
-          FULL_PARAMS_OBJECT='${{ fromJson(steps.read_params_file.outputs.PARAMS_CONTENT) }}'
-          VM_NAME="${{ fromJson(FULL_PARAMS_OBJECT.parameters.vmName).value }}"
-          RESOURCE_GROUP="${{ fromJson(FULL_PARAMS_OBJECT.parameters.resourceGroupName).value }}"
+          # Use jq to directly extract all required values and output them for the next steps
+          # This simplifies the parsing and ensures correct JSON handling.
+          VM_NAME=$(jq -r '.parameters.vmName.value' "${{ matrix.vm_params_file }}")
+          RESOURCE_GROUP=$(jq -r '.parameters.resourceGroupName.value' "${{ matrix.vm_params_file }}")
           
-          # Extract the inner 'parameters' object from the full JSON and stringify it
-          # This is the precise JSON structure expected by 'parameters' input for inline JSON.
-          INLINE_PARAMS_JSON=$(echo "${{ fromJson(FULL_PARAMS_OBJECT).parameters }}" | jq -c '.')
+          # Extract ONLY the 'parameters' object and output it as a compact JSON string
+          INLINE_PARAMS_JSON=$(jq -c '.parameters' "${{ matrix.vm_params_file }}")
           
           echo "VM_NAME=$VM_NAME" >> $GITHUB_OUTPUT
           echo "RESOURCE_GROUP=$RESOURCE_GROUP" >> $GITHUB_OUTPUT
           echo "INLINE_PARAMS_JSON=$INLINE_PARAMS_JSON" >> $GITHUB_OUTPUT
-        shell: bash # Use bash as we're performing shell operations and then piping to jq
+        shell: bash
 
       - name: Deploy VM Key Vault Extension for ${{ steps.extract_params.outputs.VM_NAME }}
         uses: azure/arm-deploy@v2 # Using @v2 is generally preferred for the latest features/fixes
