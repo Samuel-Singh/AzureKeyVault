@@ -1,11 +1,11 @@
-name: Deploy Azure Key Vault Extension
+name: Deploy VM Key Vault Extension
 
 on:
-#  push:
-#    branches:
-#      - main
-#    paths:
-#      - 'bicep/**' # Trigger if any bicep file (including param files) changes
+# push:
+# branches:
+# - main
+# paths:
+# - 'bicep/**' # Trigger if any bicep file (including param files) changes
   workflow_dispatch: # Allow manual triggering from GitHub UI
 
 env:
@@ -35,9 +35,10 @@ jobs:
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }} # GitHub Secret containing your Service Principal JSON
 
-      - name: Extract Parameters from ${{ matrix.vm_params_file }}
-        id: extract_params
+      - name: Extract VM Name and Resource Group
+        id: extract_params # Renamed for clarity as it no longer extracts *all* params
         run: |
+          # Only extract VM_NAME and RESOURCE_GROUP for workflow variables
           VM_NAME=$(jq -r '.parameters.vmName.value' "${{ matrix.vm_params_file }}")
           RESOURCE_GROUP=$(jq -r '.parameters.resourceGroupName.value' "${{ matrix.vm_params_file }}")
           
@@ -51,12 +52,10 @@ jobs:
         with:
           subscriptionId: ${{ secrets.AZURE_SUBSCRIPTION_ID || fromJson(secrets.AZURE_CREDENTIALS).subscriptionId }}
           resourceGroupName: ${{ steps.extract_params.outputs.RESOURCE_GROUP }} # Dynamic Resource Group
-          template: ${{ env.BICEP_FILE_PATH }}
-          parameters: ${{ matrix.vm_params_file }} # Use the matrix variable here
+          template: bicep/vm-keyvault-extension.bicep # Direct path to Bicep template
+          parameters: ${{ matrix.vm_params_file }} # Direct path to the parameter file
           deploymentName: deploy-kv-ext-${{ steps.extract_params.outputs.VM_NAME }}-${{ github.run_id }}
           failOnStdErr: false # Keep this to explicitly ignore non-critical stderr output
-          # continue-on-error is handled by strategy.fail-fast: false at the job level
-          # and checking the step outcome in the next step.
           
       - name: Check Deployment Result for ${{ steps.extract_params.outputs.VM_NAME }}
         if: ${{ steps.arm_deploy.outcome != 'success' }} # This step runs ONLY if the deployment step did NOT succeed
