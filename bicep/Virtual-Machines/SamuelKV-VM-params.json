@@ -8,7 +8,7 @@
     "location": {
       "value": "southcentralus"
     },
-    "resourceGroupName": {
+    "resourceGroupName": {  // This parameter is used by the GitHub Action, not the Bicep directly
       "value": "Samuel_KeyVault_RG"
     },
     "observedCertificates": {
