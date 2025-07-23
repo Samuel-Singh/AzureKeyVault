@@ -29,7 +29,8 @@ jobs:
         id: extract_params
         run: |
           VM_NAME=$(jq -r '.parameters.vmName.value' "${{ matrix.vm_params_file }}")
-          RESOURCE_GROUP=$(jq -r '.parameters.resourceGroupName.value' "${{ matrix.vm_params_file }}")
+          # IMPORTANT CHANGE: Read 'targetResourceGroup' from the root of the JSON
+          RESOURCE_GROUP=$(jq -r '.targetResourceGroup' "${{ matrix.vm_params_file }}") 
           INLINE_PARAMS_JSON=$(jq -c '.parameters' "${{ matrix.vm_params_file }}")
           
           echo "VM_NAME=$VM_NAME" >> $GITHUB_OUTPUT
@@ -40,7 +41,7 @@ jobs:
       - name: Deploy VM Key Vault Extension for ${{ steps.extract_params.outputs.VM_NAME }}
         run: |
           az deployment group create \
-            --resource-group "${{ steps.extract_params.outputs.RESOURCE_GROUP }}" \ # <--- Make sure this line correctly uses the output variable
+            --resource-group "${{ steps.extract_params.outputs.RESOURCE_GROUP }}" \ # This line is now correct
             --template-file "${{ env.BICEP_FILE_PATH }}" \
             --parameters '${{ steps.extract_params.outputs.INLINE_PARAMS_JSON }}' \
             --name "deploy-kv-ext-${{ steps.extract_params.outputs.VM_NAME }}-${{ github.run_id }}" \
@@ -48,7 +49,7 @@ jobs:
         shell: bash
           
       - name: Check Deployment Result for ${{ steps.extract_params.outputs.VM_NAME }}
-        if: ${{ steps.arm_deploy.outcome != 'success' }}
+        if: always() # Always run this step to see what happened
         run: |
-          echo "❌ Deployment for VM: ${{ steps.extract_params.outputs.VM_NAME }} in RG: ${{ steps.extract_params.outputs.RESOURCE_GROUP }} FAILED. Continuing with other deployments."
+          echo "Review the logs above to confirm deployment status for VM: ${{ steps.extract_params.outputs.VM_NAME }} in RG: ${{ steps.extract_params.outputs.RESOURCE_GROUP }}"
         shell: bash
