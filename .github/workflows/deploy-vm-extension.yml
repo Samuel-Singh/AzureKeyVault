@@ -1,11 +1,11 @@
-name: Deploy Azure Key Vault Extension
+name: Deploy VM Key Vault Extension
 
 on:
-#  push:
-#    branches:
-#      - main
-#    paths:
-#      - 'bicep/**' # Trigger if any bicep file (including param files) changes
+# push:
+# branches:
+# - main
+# paths:
+# - 'bicep/**' # Trigger if any bicep file (including param files) changes
   workflow_dispatch: # Allow manual triggering from GitHub UI
 
 env:
@@ -18,49 +18,54 @@ jobs:
     strategy:
       fail-fast: false # This is CRITICAL. It ensures that if one job fails, others still run.
       matrix:
-        # List all your VM parameter files here.
-        # Ensure these paths are correct relative to your repository root.
         vm_params_file:
           - 'bicep/Virtual-Machines/SamuelKV-VM-params.json'
-          # Add more files as you create them:
-          # - 'bicep/vm3-params.json'
-          # - 'bicep/another-vm-params.json'
 
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v4 # Action to check out your repository code
+        uses: actions/checkout@v4
 
       - name: Azure Login
-        uses: azure/login@v2 # Action to log into Azure using a Service Principal
+        uses: azure/login@v2
         with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }} # GitHub Secret containing your Service Principal JSON
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-      - name: Extract Parameters from ${{ matrix.vm_params_file }}
+      - name: Extract VM Name, Resource Group, and Parameters JSON
         id: extract_params
         run: |
+          # Extract VM Name and Resource Group
           VM_NAME=$(jq -r '.parameters.vmName.value' "${{ matrix.vm_params_file }}")
           RESOURCE_GROUP=$(jq -r '.parameters.resourceGroupName.value' "${{ matrix.vm_params_file }}")
           
+          # Extract ONLY the '.parameters' object and output it as a compact JSON string
+          # This string will be passed directly to --parameters
+          INLINE_PARAMS_JSON=$(jq -c '.parameters' "${{ matrix.vm_params_file }}")
+          
           echo "VM_NAME=$VM_NAME" >> $GITHUB_OUTPUT
           echo "RESOURCE_GROUP=$RESOURCE_GROUP" >> $GITHUB_OUTPUT
+          # The trick here is to ensure the JSON string is properly quoted for shell
+          # GitHub Actions automatically handles this for expressions in 'with:'
+          # But for 'run:' blocks, we need to be careful.
+          # We'll use a delimiter for multi-line output to ensure no quoting issues for complex JSON.
+          echo "INLINE_PARAMS_JSON<<EOF" >> $GITHUB_OUTPUT
+          echo "$INLINE_PARAMS_JSON" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
         shell: bash
 
       - name: Deploy VM Key Vault Extension for ${{ steps.extract_params.outputs.VM_NAME }}
         run: |
+          # Use the extracted JSON string directly with az deployment group create
+          # The 'parameters' argument here directly takes a JSON string, not a file path.
           az deployment group create \
-            --resource-group ${{ steps.extract_params.outputs.RESOURCE_GROUP }} \
-            --template-file ${{ env.BICEP_FILE_PATH }} \
-            --parameters @${{ matrix.vm_params_file }} \
-            --name deploy-kv-ext-${{ steps.extract_params.outputs.VM_NAME }}-${{ github.run_id }} \
-            --query properties.provisioningState # Optional: get the provisioning state
-            --debug # <--- Add this line
+            --resource-group "${{ steps.extract_params.outputs.RESOURCE_GROUP }}" \
+            --template-file "${{ env.BICEP_FILE_PATH }}" \
+            --parameters "${{ steps.extract_params.outputs.INLINE_PARAMS_JSON }}" \
+            --name "deploy-kv-ext-${{ steps.extract_params.outputs.VM_NAME }}-${{ github.run_id }}" \
+            --debug # Keep debug for more diagnostics if needed
         shell: bash
           
       - name: Check Deployment Result for ${{ steps.extract_params.outputs.VM_NAME }}
-        if: ${{ steps.arm_deploy.outcome != 'success' }} # This step runs ONLY if the deployment step did NOT succeed
+        if: ${{ steps.arm_deploy.outcome != 'success' }}
         run: |
           echo "❌ Deployment for VM: ${{ steps.extract_params.outputs.VM_NAME }} in RG: ${{ steps.extract_params.outputs.RESOURCE_GROUP }} FAILED. Continuing with other deployments."
-          # Optionally, you could add more detailed logging here, e.g., from the deployment output.
-          # You can choose to fail the entire workflow here if you want to be stricter,
-          # but the current setup allows other matrix jobs to complete.
         shell: bash
