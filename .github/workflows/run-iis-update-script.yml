@@ -2,10 +2,6 @@ name: Deploy IIS Certificate Update
 
 on:
   workflow_dispatch: # Allows manual triggering
-  push:
-    branches:
-      - main
-      - develop
 
 jobs:
   update-iis-cert:
