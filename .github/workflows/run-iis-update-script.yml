@@ -1,0 +1,77 @@
+name: Run IIS Certificate Update Script
+
+on:
+  workflow_dispatch:
+    inputs:
+      vm_name:
+        description: 'Name of the Windows VM to run the script on'
+        required: true
+        type: string
+      resource_group:
+        description: 'Resource Group of the Windows VM'
+        required: true
+        type: string
+      # Optional input for a delay, in seconds, before running the script
+      # Useful if certificates take time to propagate after VM extension deployment
+      delay_seconds:
+        description: 'Optional: Delay in seconds before running the script (e.g., 90)'
+        required: false
+        type: number
+        default: 0
+
+env:
+  # Path to your PowerShell script within the repository
+  IIS_SCRIPT_PATH: scripts/Update-IisCertBindings.ps1
+
+jobs:
+  run_script_on_vm:
+    runs-on: ubuntu-22.04 # GitHub-hosted runner (Linux) to execute Azure CLI commands
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      # Optional: Add a delay if specified by the workflow_dispatch input
+      - name: Wait for Certificates to Propagate (Optional Delay)
+        if: github.event.inputs.delay_seconds != 0
+        run: |
+          echo "Delaying for ${{ github.event.inputs.delay_seconds }} seconds as requested..."
+          sleep ${{ github.event.inputs.delay_seconds }}
+        shell: bash
+
+      - name: Execute IIS Certificate Update Script on VM
+        run: |
+          VM_NAME="${{ github.event.inputs.vm_name }}"
+          RESOURCE_GROUP="${{ github.event.inputs.resource_group }}"
+          
+          # Check if the PowerShell script file exists
+          if [ ! -f "${{ env.IIS_SCRIPT_PATH }}" ]; then
+            echo "Error: PowerShell script not found at ${{ env.IIS_SCRIPT_PATH }}"
+            exit 1
+          fi
+
+          # Read the PowerShell script content and base64 encode it for az vm run-command
+          # '-w 0' prevents line wrapping in base64 output, which is important for run-command.
+          POWERSHELL_SCRIPT_CONTENT=$(cat "${{ env.IIS_SCRIPT_PATH }}" | base64 -w 0)
+
+          echo "Attempting to execute PowerShell script on VM: $VM_NAME in Resource Group: $RESOURCE_GROUP"
+          az vm run-command invoke \
+            --resource-group "$RESOURCE_GROUP" \
+            --name "$VM_NAME" \
+            --command-id RunPowerShellScript \
+            --scripts "$POWERSHELL_SCRIPT_CONTENT" \
+            --query 'value[0].message' # This query helps display the PowerShell script's output directly
+        shell: bash
+        # Ensure this step fails if the run-command fails
+        continue-on-error: false 
+
+      - name: Script Execution Result
+        if: always() # Always run this step to see the outcome
+        run: |
+          echo "Review the logs for 'Execute IIS Certificate Update Script on VM' step to confirm script outcome."
+        shell: bash
