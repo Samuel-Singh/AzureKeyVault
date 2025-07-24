@@ -1,58 +1,104 @@
-name: Deploy IIS Certificate Update
+name: IIS Certificate Update (Scheduled & Manual)
 
 on:
+  schedule:
+    # Runs every hour at 30 minutes past the hour. (UTC time)
+    # Adjust '30 * * * *' to your preferred schedule.
+    # For every 4 hours at 30 minutes past the hour: '30 */4 * * *'
+    # For every 6 hours at 0 minutes past the hour: '0 */6 * * *'
+    - cron: '30 * * * *'
+
   workflow_dispatch:
     inputs:
-      vm_params_file:
-        description: 'Path to the VM parameters JSON file'
-        required: true
-        default: 'bicep/Virtual-Machines/SamuelKV-VM-params.json' # Provide a default for convenience
+      # This input is only available when manually dispatching the workflow
+      vm_params_glob:
+        description: 'Glob pattern for VM parameters JSON files (e.g., bicep/Virtual-Machines/*-params.json)'
+        required: false # Make it optional for manual runs, so the default scheduled behavior can apply
+        default: 'bicep/Virtual-Machines/*.json' # Provide a default for manual trigger
 
 jobs:
+  # Job 1: Find all VM parameter files matching the specified glob pattern
+  find-vm-param-files:
+    runs-on: ubuntu-latest
+    outputs:
+      vm_param_files: ${{ steps.get_files.outputs.files_json }}
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    - name: Get VM Parameter Files
+      id: get_files
+      run: |
+        # Determine the glob pattern based on the event that triggered the workflow
+        # If it's a workflow_dispatch event, use the provided input.
+        # Otherwise (e.g., scheduled run), use the default hardcoded pattern.
+        if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+          # Use the input value for manual runs
+          GLOB_PATTERN="${{ github.event.inputs.vm_params_glob }}"
+          if [ -z "$GLOB_PATTERN" ]; then
+            # Fallback if input is empty, though 'default' should prevent this
+            GLOB_PATTERN="bicep/Virtual-Machines/*.json"
+            echo "Warning: No glob pattern provided for manual dispatch. Using default: $GLOB_PATTERN"
+          fi
+        else
+          # Use the hardcoded pattern for scheduled runs
+          GLOB_PATTERN="bicep/Virtual-Machines/*.json" # Adjust this if your files have a more specific naming convention
+        fi
+
+        echo "Searching for parameter files matching: $GLOB_PATTERN"
+
+        FILES_JSON=$(find "$(dirname "$GLOB_PATTERN")" -maxdepth 1 -name "$(basename "$GLOB_PATTERN")" -type f -print0 | jq -R -s 'split("\u0000") | map(select(length > 0))')
+
+        if [ "$FILES_JSON" == "[]" ]; then
+          echo "No files found matching '$GLOB_PATTERN'. Exiting."
+          exit 0 # Exit successfully if no files are found to avoid failing the workflow unnecessarily
+        fi
+
+        echo "Found files: $FILES_JSON"
+        echo "files_json=$FILES_JSON" >> "$GITHUB_OUTPUT"
+      shell: bash
+
+  # Job 2: Run the IIS certificate update for each VM parameter file found
   update-iis-cert:
+    if: needs.find-vm-param-files.outputs.vm_param_files != '[]'
+    needs: find-vm-param-files
     runs-on: ubuntu-latest
 
-    # Using a matrix strategy to iterate over parameter files.
-    # While you only have one for now, this sets you up for easy expansion.
     strategy:
-      fail-fast: false # Set to false if you want other matrix jobs to continue even if one fails
+      fail-fast: false
       matrix:
-        vm_params_file:
-          # Use the input from workflow_dispatch
-          - ${{ github.event.inputs.vm_params_file }}
+        vm_params_file: ${{ fromJson(needs.find-vm-param-files.outputs.vm_param_files) }}
 
-    environment: # Optional: Define an environment for better visibility and protection rules
-      name: Production # Or 'Development', 'Staging', etc.
+    environment:
+      name: Production
 
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
 
     - name: Azure Login
-      uses: azure/login@v1 # Or v2, depending on your preference and features needed.
+      uses: azure/login@v1
       with:
         creds: ${{ secrets.AZURE_CREDENTIALS }}
 
     - name: Extract VM Name and Resource Group from Parameter File
-      id: extract_params # This ID allows us to reference its outputs later
+      id: extract_params
       run: |
         PARAM_FILE="${{ matrix.vm_params_file }}"
         echo "Reading parameters from: $PARAM_FILE"
 
-        # Check if the parameter file exists
         if [ ! -f "$PARAM_FILE" ]; then
           echo "Error: Parameter file not found at $PARAM_FILE."
           exit 1
         fi
 
-        # Extract VM Name
         VM_NAME=$(jq -r '.parameters.vmName.value' "$PARAM_FILE")
         if [ -z "$VM_NAME" ]; then
           echo "Error: 'vmName' not found in $PARAM_FILE or is empty."
           exit 1
         fi
 
-        # Extract Resource Group
         RESOURCE_GROUP=$(jq -r '.targetResourceGroup' "$PARAM_FILE")
         if [ -z "$RESOURCE_GROUP" ]; then
           echo "Error: 'targetResourceGroup' not found in $PARAM_FILE or is empty."
@@ -62,7 +108,6 @@ jobs:
         echo "Extracted VM Name: $VM_NAME"
         echo "Extracted Resource Group: $RESOURCE_GROUP"
 
-        # Output these values so subsequent steps can use them
         echo "VM_NAME=$VM_NAME" >> "$GITHUB_OUTPUT"
         echo "RESOURCE_GROUP=$RESOURCE_GROUP" >> "$GITHUB_OUTPUT"
       shell: bash
@@ -70,7 +115,6 @@ jobs:
     - name: Execute IIS Certificate Update Script on VM ${{ steps.extract_params.outputs.VM_NAME }}
       id: run-script-on-vm
       run: |
-        # Use the extracted variables from the previous step
         VM_NAME="${{ steps.extract_params.outputs.VM_NAME }}"
         RESOURCE_GROUP="${{ steps.extract_params.outputs.RESOURCE_GROUP }}"
         POWERSHELL_SCRIPT_PATH="scripts/Update-IisCertBindings.ps1"
