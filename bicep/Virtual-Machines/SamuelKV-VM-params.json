@@ -22,6 +22,11 @@
           "certificateStoreLocation": "LocalMachine"
         },
         {
+          "url": "https://samuelkv.vault.azure.net/secrets/Samuel/",
+          "certificateStoreName": "MY",
+          "certificateStoreLocation": "LocalMachine"
+        },
+        {
           "url": "https://samuelkv.vault.azure.net/secrets/Second-Cert-Key-Vault/",
           "certificateStoreName": "MY",
           "certificateStoreLocation": "LocalMachine"
