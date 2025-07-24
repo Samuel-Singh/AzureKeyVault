@@ -1,128 +1,164 @@
 name: IIS Certificate Update (Scheduled & Manual)
 
 on:
-#  schedule:
+  schedule:
     # Runs every hour at 30 minutes past the hour. (UTC time)
     # Adjust '30 * * * *' to your preferred schedule.
-    # For every 4 hours at 30 minutes past the hour: '30 */4 * * *'
-    # For every 6 hours at 0 minutes past the hour: '0 */6 * * *'
-#    - cron: '30 * * * *'
+    # For example:
+    #   '0 */4 * * *'  - Every 4 hours at minute 0
+    #   '0 0 * * *'    - Every day at midnight UTC
+    - cron: '30 * * * *'
 
   workflow_dispatch:
     inputs:
-      # This input is only available when manually dispatching the workflow
+      # This input allows specifying a glob pattern when manually dispatching the workflow.
+      # It's optional, allowing the default behavior (all .json files in the directory)
+      # to apply if no input is provided.
       vm_params_glob:
         description: 'Glob pattern for VM parameters JSON files (e.g., bicep/Virtual-Machines/*-params.json)'
-        required: false # Make it optional for manual runs, so the default scheduled behavior can apply
-        default: 'bicep/Virtual-Machines/*.json' # Provide a default for manual trigger
+        required: false
+        default: 'bicep/Virtual-Machines/*.json' # Default value for manual trigger if left blank
 
 jobs:
-  # Job 1: Find all VM parameter files matching the specified glob pattern
+  # Job 1: Find all VM parameter files matching the determined glob pattern
   find-vm-param-files:
     runs-on: ubuntu-latest
     outputs:
+      # This output will be a JSON array of file paths (e.g., ["path/to/file1.json", "path/to/file2.json"])
       vm_param_files: ${{ steps.get_files.outputs.files_json }}
 
     steps:
     - name: Checkout Repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@v4 # Essential: Clones your repository onto the GitHub Actions runner.
 
     - name: Get VM Parameter Files
-      id: get_files
+      id: get_files # Unique ID for this step, allowing its outputs to be referenced.
       run: |
-        # Determine the glob pattern based on the event that triggered the workflow
-        # If it's a workflow_dispatch event, use the provided input.
+        # Determine the glob pattern based on the event that triggered the workflow.
+        # If it's a workflow_dispatch event (manual run), use the provided input.
         # Otherwise (e.g., scheduled run), use the default hardcoded pattern.
         if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
-          # Use the input value for manual runs
           GLOB_PATTERN="${{ github.event.inputs.vm_params_glob }}"
+          # Fallback check if the input was empty (though 'default' handles this mostly)
           if [ -z "$GLOB_PATTERN" ]; then
-            # Fallback if input is empty, though 'default' should prevent this
-            GLOB_PATTERN="bicep/Virtual-Machines/*.json"
+            GLOB_PATTERN="bicep/Virtual-Machines/*.json" # Ensure a default is always set
             echo "Warning: No glob pattern provided for manual dispatch. Using default: $GLOB_PATTERN"
           fi
         else
-          # Use the hardcoded pattern for scheduled runs
-          GLOB_PATTERN="bicep/Virtual-Machines/*.json" # Adjust this if your files have a more specific naming convention
+          # Hardcoded pattern for scheduled runs
+          GLOB_PATTERN="bicep/Virtual-Machines/*.json" # Adjust this if your files have a more specific naming convention (e.g., '*-params.json')
         fi
 
         echo "Searching for parameter files matching: $GLOB_PATTERN"
 
+        # Use 'find' to robustly locate files matching the glob.
+        # -maxdepth 1: Limits search to the specified directory (no subdirectories).
+        # -name "$(basename "$GLOB_PATTERN")": Uses the wildcard part of the glob (e.g., "*.json").
+        # -type f: Ensures only regular files are matched (not directories).
+        # -print0 and jq -R -s 'split("\u0000") | map(select(length > 0))':
+        #   -print0: Outputs file paths null-terminated, which safely handles spaces/special characters.
+        #   jq -R -s 'split("\u0000") | map(select(length > 0))':
+        #   - Reads null-separated strings as raw lines (-R).
+        #   - Slurps all inputs into one array (-s).
+        #   - Splits the input string by null characters (\u0000).
+        #   - Filters out any empty strings that might result from the split.
+        #   This creates a valid JSON array of file paths.
         FILES_JSON=$(find "$(dirname "$GLOB_PATTERN")" -maxdepth 1 -name "$(basename "$GLOB_PATTERN")" -type f -print0 | jq -R -s 'split("\u0000") | map(select(length > 0))')
 
         if [ "$FILES_JSON" == "[]" ]; then
-          echo "No files found matching '$GLOB_PATTERN'. Exiting."
-          exit 0 # Exit successfully if no files are found to avoid failing the workflow unnecessarily
+          echo "No files found matching '$GLOB_PATTERN'. Exiting gracefully as no VMs need processing."
+          exit 0 # Exit successfully if no files are found; this prevents the dependent job from running.
         fi
 
-        echo "Found files: $FILES_JSON"
-        echo "files_json=$FILES_JSON" >> "$GITHUB_OUTPUT"
-      shell: bash
+        echo "Found files JSON: $FILES_JSON"
+        # Set the output variable 'files_json' for subsequent jobs to consume.
+        # Using the multi-line syntax for GITHUB_OUTPUT to correctly handle JSON with newlines.
+        echo "files_json<<EOF" >> "$GITHUB_OUTPUT"
+        echo "$FILES_JSON" >> "$GITHUB_OUTPUT"
+        echo "EOF" >> "$GITHUB_OUTPUT"
+      shell: bash # Specifies the shell to execute the 'run' commands.
 
   # Job 2: Run the IIS certificate update for each VM parameter file found
   update-iis-cert:
+    # This job will only run if the 'find-vm-param-files' job successfully found files
+    # (i.e., its output 'vm_param_files' is not an empty JSON array '[]').
     if: needs.find-vm-param-files.outputs.vm_param_files != '[]'
-    needs: find-vm-param-files
-    runs-on: ubuntu-latest
+    needs: find-vm-param-files # Declares a dependency on the 'find-vm-param-files' job.
+    runs-on: ubuntu-latest # Specifies the runner environment for this job.
 
     strategy:
-      fail-fast: false
+      fail-fast: false # Set to 'false' if you want all matrix jobs to attempt to run
+                       # even if one fails. Set to 'true' (default) to cancel
+                       # all other matrix jobs on the first failure.
       matrix:
+        # The 'vm_params_file' matrix is dynamically populated from the JSON array
+        # output of the 'find-vm-param-files' job. 'fromJson' parses the string.
         vm_params_file: ${{ fromJson(needs.find-vm-param-files.outputs.vm_param_files) }}
 
     environment:
+      # Optional: Link this job to an environment (e.g., 'Production') for
+      # better visibility, deployment protection rules, or secrets management.
       name: Production
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v4 # Checks out your repository code into the runner's workspace.
 
     - name: Azure Login
-      uses: azure/login@v1
+      uses: azure/login@v1 # Uses the Azure Login action to authenticate with Azure.
       with:
+        # 'creds' should be a GitHub Secret containing your Azure Service Principal JSON.
+        # Example: {"clientId":"...", "clientSecret":"...", "subscriptionId":"...", "tenantId":"..."}
         creds: ${{ secrets.AZURE_CREDENTIALS }}
 
     - name: Extract VM Name and Resource Group from Parameter File
-      id: extract_params
+      id: extract_params # ID to reference this step's outputs (VM_NAME, RESOURCE_GROUP).
       run: |
+        # The current parameter file path for this matrix iteration.
         PARAM_FILE="${{ matrix.vm_params_file }}"
         echo "Reading parameters from: $PARAM_FILE"
 
+        # Basic validation: ensure the parameter file exists.
         if [ ! -f "$PARAM_FILE" ]; then
-          echo "Error: Parameter file not found at $PARAM_FILE."
+          echo "Error: Parameter file not found at $PARAM_FILE. This should not happen if 'find-vm-param-files' was successful."
           exit 1
         fi
 
+        # Extract 'vmName' using jq.
         VM_NAME=$(jq -r '.parameters.vmName.value' "$PARAM_FILE")
         if [ -z "$VM_NAME" ]; then
-          echo "Error: 'vmName' not found in $PARAM_FILE or is empty."
+          echo "Error: 'vmName' not found in $PARAM_FILE or is empty. Please check the parameter file format."
           exit 1
         fi
 
+        # Extract 'targetResourceGroup' using jq.
         RESOURCE_GROUP=$(jq -r '.targetResourceGroup' "$PARAM_FILE")
         if [ -z "$RESOURCE_GROUP" ]; then
-          echo "Error: 'targetResourceGroup' not found in $PARAM_FILE or is empty."
+          echo "Error: 'targetResourceGroup' not found in $PARAM_FILE or is empty. Please check the parameter file format."
           exit 1
         fi
 
         echo "Extracted VM Name: $VM_NAME"
         echo "Extracted Resource Group: $RESOURCE_GROUP"
 
+        # Output these variables so they can be used by subsequent steps in this job.
         echo "VM_NAME=$VM_NAME" >> "$GITHUB_OUTPUT"
         echo "RESOURCE_GROUP=$RESOURCE_GROUP" >> "$GITHUB_OUTPUT"
       shell: bash
 
     - name: Execute IIS Certificate Update Script on VM ${{ steps.extract_params.outputs.VM_NAME }}
-      id: run-script-on-vm
+      id: run-script-on-vm # ID for this step.
       run: |
+        # Use the VM_NAME and RESOURCE_GROUP extracted in the previous step.
         VM_NAME="${{ steps.extract_params.outputs.VM_NAME }}"
         RESOURCE_GROUP="${{ steps.extract_params.outputs.RESOURCE_GROUP }}"
         POWERSHELL_SCRIPT_PATH="scripts/Update-IisCertBindings.ps1"
 
         echo "--- Script Pre-check ---"
+        # Validate that the PowerShell script exists locally on the runner.
         if [ ! -f "$POWERSHELL_SCRIPT_PATH" ]; then
           echo "Error: PowerShell script not found at $POWERSHELL_SCRIPT_PATH."
-          echo "Please ensure it's in the '$POWERSHELL_SCRIPT_PATH' folder relative to your repository root."
+          echo "Please ensure it's in the 'scripts/' folder relative to your repository root."
           exit 1
         fi
         echo "PowerShell script found: $POWERSHELL_SCRIPT_PATH"
@@ -131,6 +167,11 @@ jobs:
 
         echo "Attempting to execute PowerShell script on VM: $VM_NAME in Resource Group: $RESOURCE_GROUP"
 
+        # Invoke the Azure VM run command.
+        # --scripts expects the raw content of the PowerShell script.
+        # --output json ensures the response is in JSON format for parsing.
+        # --only-show-errors (optional) can reduce verbosity from Azure CLI itself,
+        # but we're parsing the full JSON output anyway.
         AZ_RUN_COMMAND_OUTPUT=$(az vm run-command invoke \
           --resource-group "$RESOURCE_GROUP" \
           --name "$VM_NAME" \
@@ -143,10 +184,14 @@ jobs:
         echo ""
         echo "--- PowerShell Script Output from VM ---"
 
+        # Parse the JSON output from az vm run-command invoke to extract stdout and stderr.
+        # It typically returns an array in 'value'. Stdout is often the first element, stderr the second.
+        # We also use 'select' to explicitly find messages with 'ComponentStatus/StdOut/succeeded' or 'StdErr'.
         if echo "$AZ_RUN_COMMAND_OUTPUT" | jq -e '.value[0]' > /dev/null; then
           SCRIPT_STDOUT=$(echo "$AZ_RUN_COMMAND_OUTPUT" | jq -r '.value[] | select(.code == "ComponentStatus/StdOut/succeeded").message' 2>/dev/null || echo "")
           SCRIPT_STDERR=$(echo "$AZ_RUN_COMMAND_OUTPUT" | jq -r '.value[] | select(.code == "ComponentStatus/StdErr/succeeded").message' 2>/dev/null || echo "")
 
+          # Fallback to generic array indexing if specific 'code' is not found (for older CLI versions or different outputs).
           if [ -z "$SCRIPT_STDOUT" ] && [ -z "$SCRIPT_STDERR" ]; then
             SCRIPT_STDOUT=$(echo "$AZ_RUN_COMMAND_OUTPUT" | jq -r '.value[0].message' 2>/dev/null || echo "")
             SCRIPT_STDERR=$(echo "$AZ_RUN_COMMAND_OUTPUT" | jq -r '.value[1].message' 2>/dev/null || echo "")
@@ -157,7 +202,7 @@ jobs:
           echo "--------------------------------"
 
           if [ -n "$SCRIPT_STDERR" ]; then
-            echo ""
+            echo "" # Add a newline for better readability if stderr exists.
             echo "--- Standard Error (STDERR) ---"
             echo "$SCRIPT_STDERR"
             echo "-------------------------------"
@@ -165,18 +210,20 @@ jobs:
             echo "No Standard Error (STDERR) reported."
           fi
         else
+          # This block executes if the JSON output from 'az vm run-command invoke' was unexpected or empty.
           echo "Error: Could not parse expected output from 'az vm run-command invoke'."
-          echo "This might indicate an issue with the command execution or an unexpected response format."
+          echo "This might indicate an issue with the command execution, network, or an unexpected JSON response format."
           echo "Full JSON output received:"
           echo "$AZ_RUN_COMMAND_OUTPUT"
-          exit 1
+          exit 1 # Fail this step, as we couldn't get proper output.
         fi
         echo "------------------------------"
 
       env:
-        IIS_SCRIPT_PATH: scripts/Update-IisCertBindings.ps1
+        IIS_SCRIPT_PATH: scripts/Update-IisCertBindings.ps1 # This environment variable is for documentation/clarity here;
+                                                           # the script content is read directly via 'cat'.
 
     - name: Final Confirmation Message for ${{ steps.extract_params.outputs.VM_NAME }}
       run: |
-        echo "Review the logs for the 'Execute IIS Certificate Update Script on VM ${{ steps.extract_params.outputs.VM_NAME }}' step to confirm the PowerShell script's outcome."
-        echo "Look for '--- Standard Output (STDOUT) ---' and '--- Standard Error (STDERR) ---' sections."
+        echo "Review the logs for the 'Execute IIS Certificate Update Script on VM ${{ steps.extract_params.outputs.VM_NAME }}' step (above this message) to confirm the PowerShell script's outcome."
+        echo "Look for '--- Standard Output (STDOUT) ---' and '--- Standard Error (STDERR) ---' sections within that step's logs."
