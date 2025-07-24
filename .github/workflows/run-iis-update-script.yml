@@ -3,18 +3,11 @@ name: Run IIS Certificate Update Script
 on:
   workflow_dispatch:
     inputs:
-      vm_name:
-        description: 'Name of the Windows VM to run the script on'
-        required: true
-        type: string
-      resource_group:
-        description: 'Resource Group of the Windows VM'
-        required: true
-        type: string
-      # Optional input for a delay, in seconds, before running the script
-      # Useful if certificates take time to propagate after VM extension deployment
+      # The 'vm_params_file' will now be part of the matrix, not a manual input
+      # The 'delay_seconds' can remain as a global input if you want to apply a delay
+      # to all VMs processed by the matrix, or it can be removed if not needed.
       delay_seconds:
-        description: 'Optional: Delay in seconds before running the script (e.g., 90)'
+        description: 'Optional: Delay in seconds before running the script (e.g., 90) for each VM in the matrix'
         required: false
         type: number
         default: 0
@@ -27,6 +20,16 @@ jobs:
   run_script_on_vm:
     runs-on: ubuntu-22.04 # GitHub-hosted runner (Linux) to execute Azure CLI commands
 
+    strategy:
+      fail-fast: false # Set to true if you want the workflow to stop on the first failed VM
+      matrix:
+        vm_params_file:
+          - 'bicep/Virtual-Machines/SamuelKV-VM-params.json'
+          # Add any other VM parameter files here if you want to run the script
+          # on multiple VMs in a single workflow dispatch.
+          # For example:
+          # - 'bicep/Virtual-Machines/AnotherVM-params.json'
+
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -36,27 +39,37 @@ jobs:
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
+      - name: Extract VM Name and Resource Group from Params File
+        id: extract_vm_info # Changed ID for clarity
+        run: |
+          VM_NAME=$(jq -r '.parameters.vmName.value' "${{ matrix.vm_params_file }}")
+          RESOURCE_GROUP=$(jq -r '.targetResourceGroup' "${{ matrix.vm_params_file }}")
+
+          echo "VM_NAME=$VM_NAME" >> $GITHUB_OUTPUT
+          echo "RESOURCE_GROUP=$RESOURCE_GROUP" >> $GITHUB_OUTPUT
+          echo "Extracted VM Name: $VM_NAME, Resource Group: $RESOURCE_GROUP from ${{ matrix.vm_params_file }}"
+        shell: bash
+
       # Optional: Add a delay if specified by the workflow_dispatch input
       - name: Wait for Certificates to Propagate (Optional Delay)
         if: github.event.inputs.delay_seconds != 0
         run: |
-          echo "Delaying for ${{ github.event.inputs.delay_seconds }} seconds as requested..."
+          echo "Delaying for ${{ github.event.inputs.delay_seconds }} seconds as requested for VM: ${{ steps.extract_vm_info.outputs.VM_NAME }}..."
           sleep ${{ github.event.inputs.delay_seconds }}
         shell: bash
 
-      - name: Execute IIS Certificate Update Script on VM
+      - name: Execute IIS Certificate Update Script on VM ${{ steps.extract_vm_info.outputs.VM_NAME }}
         run: |
-          VM_NAME="${{ github.event.inputs.vm_name }}"
-          RESOURCE_GROUP="${{ github.event.inputs.resource_group }}"
+          VM_NAME="${{ steps.extract_vm_info.outputs.VM_NAME }}"
+          RESOURCE_GROUP="${{ steps.extract_vm_info.outputs.RESOURCE_GROUP }}"
           
-          # Check if the PowerShell script file exists
+          # Check if the PowerShell script file exists locally on the runner
           if [ ! -f "${{ env.IIS_SCRIPT_PATH }}" ]; then
-            echo "Error: PowerShell script not found at ${{ env.IIS_SCRIPT_PATH }}"
+            echo "Error: PowerShell script not found at ${{ env.IIS_SCRIPT_PATH }}. Please ensure it's in the 'scripts' folder."
             exit 1
           fi
 
           # Read the PowerShell script content and base64 encode it for az vm run-command
-          # '-w 0' prevents line wrapping in base64 output, which is important for run-command.
           POWERSHELL_SCRIPT_CONTENT=$(cat "${{ env.IIS_SCRIPT_PATH }}" | base64 -w 0)
 
           echo "Attempting to execute PowerShell script on VM: $VM_NAME in Resource Group: $RESOURCE_GROUP"
@@ -65,13 +78,13 @@ jobs:
             --name "$VM_NAME" \
             --command-id RunPowerShellScript \
             --scripts "$POWERSHELL_SCRIPT_CONTENT" \
-            --query 'value[0].message' # This query helps display the PowerShell script's output directly
+            --query 'value[0].message' # Display the PowerShell script's output
         shell: bash
-        # Ensure this step fails if the run-command fails
+        # Ensure this step fails if the run-command fails on the VM
         continue-on-error: false 
 
-      - name: Script Execution Result
-        if: always() # Always run this step to see the outcome
+      - name: Script Execution Result for ${{ steps.extract_vm_info.outputs.VM_NAME }}
+        if: always() # Always run this step to see the outcome for each matrix item
         run: |
-          echo "Review the logs for 'Execute IIS Certificate Update Script on VM' step to confirm script outcome."
+          echo "Review the logs for 'Execute IIS Certificate Update Script on VM ${{ steps.extract_vm_info.outputs.VM_NAME }}' step to confirm script outcome."
         shell: bash
