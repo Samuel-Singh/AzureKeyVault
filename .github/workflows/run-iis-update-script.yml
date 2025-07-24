@@ -1,69 +1,138 @@
 name: Deploy IIS Certificate Update
 
 on:
-  workflow_dispatch: # Allows manual triggering
+  workflow_dispatch:
+    inputs:
+      vm_params_file:
+        description: 'Path to the VM parameters JSON file'
+        required: true
+        default: 'bicep/Virtual-Machines/SamuelKV-VM-params.json' # Provide a default for convenience
 
 jobs:
   update-iis-cert:
-    runs-on: ubuntu-latest # Or windows-latest if you prefer to run AZ CLI commands from Windows runner
+    runs-on: ubuntu-latest
+
+    # Using a matrix strategy to iterate over parameter files.
+    # While you only have one for now, this sets you up for easy expansion.
+    strategy:
+      fail-fast: false # Set to false if you want other matrix jobs to continue even if one fails
+      matrix:
+        vm_params_file:
+          # Use the input from workflow_dispatch
+          - ${{ github.event.inputs.vm_params_file }}
+
+    environment: # Optional: Define an environment for better visibility and protection rules
+      name: Production # Or 'Development', 'Staging', etc.
 
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
 
     - name: Azure Login
-      uses: azure/login@v1
+      uses: azure/login@v1 # Or v2, depending on your preference and features needed.
       with:
-        creds: ${{ secrets.AZURE_CREDENTIALS }} # Ensure you have this secret configured
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-    - name: Execute IIS Certificate Update Script on VM SamuelKV
+    - name: Extract VM Name and Resource Group from Parameter File
+      id: extract_params # This ID allows us to reference its outputs later
       run: |
-        VM_NAME="SamuelKV"
-        RESOURCE_GROUP="Samuel_KeyVault_RG"
+        PARAM_FILE="${{ matrix.vm_params_file }}"
+        echo "Reading parameters from: $PARAM_FILE"
 
-        # Check if the PowerShell script file exists locally on the runner
-        if [ ! -f "scripts/Update-IisCertBindings.ps1" ]; then
-          echo "Error: PowerShell script not found at scripts/Update-IisCertBindings.ps1. Please ensure it's in the 'scripts' folder."
+        # Check if the parameter file exists
+        if [ ! -f "$PARAM_FILE" ]; then
+          echo "Error: Parameter file not found at $PARAM_FILE."
           exit 1
         fi
 
-        # Read the PowerShell script content and base64 encode it for az vm run-command
-        POWERSHELL_SCRIPT_CONTENT=$(cat "scripts/Update-IisCertBindings.ps1" | base64 -w 0)
+        # Extract VM Name
+        VM_NAME=$(jq -r '.parameters.vmName.value' "$PARAM_FILE")
+        if [ -z "$VM_NAME" ]; then
+          echo "Error: 'vmName' not found in $PARAM_FILE or is empty."
+          exit 1
+        fi
+
+        # Extract Resource Group
+        RESOURCE_GROUP=$(jq -r '.targetResourceGroup' "$PARAM_FILE")
+        if [ -z "$RESOURCE_GROUP" ]; then
+          echo "Error: 'targetResourceGroup' not found in $PARAM_FILE or is empty."
+          exit 1
+        fi
+
+        echo "Extracted VM Name: $VM_NAME"
+        echo "Extracted Resource Group: $RESOURCE_GROUP"
+
+        # Output these values so subsequent steps can use them
+        echo "VM_NAME=$VM_NAME" >> "$GITHUB_OUTPUT"
+        echo "RESOURCE_GROUP=$RESOURCE_GROUP" >> "$GITHUB_OUTPUT"
+      shell: bash
+
+    - name: Execute IIS Certificate Update Script on VM ${{ steps.extract_params.outputs.VM_NAME }}
+      id: run-script-on-vm
+      run: |
+        # Use the extracted variables from the previous step
+        VM_NAME="${{ steps.extract_params.outputs.VM_NAME }}"
+        RESOURCE_GROUP="${{ steps.extract_params.outputs.RESOURCE_GROUP }}"
+        POWERSHELL_SCRIPT_PATH="scripts/Update-IisCertBindings.ps1"
+
+        echo "--- Script Pre-check ---"
+        if [ ! -f "$POWERSHELL_SCRIPT_PATH" ]; then
+          echo "Error: PowerShell script not found at $POWERSHELL_SCRIPT_PATH."
+          echo "Please ensure it's in the '$POWERSHELL_SCRIPT_PATH' folder relative to your repository root."
+          exit 1
+        fi
+        echo "PowerShell script found: $POWERSHELL_SCRIPT_PATH"
+        echo "------------------------"
+        echo ""
 
         echo "Attempting to execute PowerShell script on VM: $VM_NAME in Resource Group: $RESOURCE_GROUP"
 
-        # Execute the command and capture the full JSON output
         AZ_RUN_COMMAND_OUTPUT=$(az vm run-command invoke \
           --resource-group "$RESOURCE_GROUP" \
           --name "$VM_NAME" \
           --command-id RunPowerShellScript \
-          --scripts "$POWERSHELL_SCRIPT_CONTENT" \
-          --output json # Ensure output is JSON for jq processing
+          --scripts "$(cat "$POWERSHELL_SCRIPT_PATH")" \
+          --output json \
+          --only-show-errors
         )
 
-        # Use jq to parse the JSON and extract both stdout and stderr
-        # Check if 'value' array exists and has elements before accessing
-        if echo "$AZ_RUN_COMMAND_OUTPUT" | jq -e '.value[0]' > /dev/null; then
-          SCRIPT_STDOUT=$(echo "$AZ_RUN_COMMAND_OUTPUT" | jq -r '.value[0].message' 2>/dev/null || echo "")
-          SCRIPT_STDERR=$(echo "$AZ_RUN_COMMAND_OUTPUT" | jq -r '.value[1].message' 2>/dev/null || echo "") # stderr is often at index 1
+        echo ""
+        echo "--- PowerShell Script Output from VM ---"
 
-          echo "--- PowerShell Script Standard Output (STDOUT) ---"
+        if echo "$AZ_RUN_COMMAND_OUTPUT" | jq -e '.value[0]' > /dev/null; then
+          SCRIPT_STDOUT=$(echo "$AZ_RUN_COMMAND_OUTPUT" | jq -r '.value[] | select(.code == "ComponentStatus/StdOut/succeeded").message' 2>/dev/null || echo "")
+          SCRIPT_STDERR=$(echo "$AZ_RUN_COMMAND_OUTPUT" | jq -r '.value[] | select(.code == "ComponentStatus/StdErr/succeeded").message' 2>/dev/null || echo "")
+
+          if [ -z "$SCRIPT_STDOUT" ] && [ -z "$SCRIPT_STDERR" ]; then
+            SCRIPT_STDOUT=$(echo "$AZ_RUN_COMMAND_OUTPUT" | jq -r '.value[0].message' 2>/dev/null || echo "")
+            SCRIPT_STDERR=$(echo "$AZ_RUN_COMMAND_OUTPUT" | jq -r '.value[1].message' 2>/dev/null || echo "")
+          fi
+
+          echo "--- Standard Output (STDOUT) ---"
           echo "$SCRIPT_STDOUT"
-          echo "---------------------------------------------------"
+          echo "--------------------------------"
 
           if [ -n "$SCRIPT_STDERR" ]; then
-            echo "--- PowerShell Script Standard Error (STDERR) ---"
+            echo ""
+            echo "--- Standard Error (STDERR) ---"
             echo "$SCRIPT_STDERR"
-            echo "---------------------------------------------------"
+            echo "-------------------------------"
+          else
+            echo "No Standard Error (STDERR) reported."
           fi
         else
-          echo "Error: Could not parse output from az vm run-command invoke. Full JSON output:"
+          echo "Error: Could not parse expected output from 'az vm run-command invoke'."
+          echo "This might indicate an issue with the command execution or an unexpected response format."
+          echo "Full JSON output received:"
           echo "$AZ_RUN_COMMAND_OUTPUT"
+          exit 1
         fi
+        echo "------------------------------"
 
       env:
         IIS_SCRIPT_PATH: scripts/Update-IisCertBindings.ps1
 
-    - name: Confirm Script Outcome
+    - name: Final Confirmation Message for ${{ steps.extract_params.outputs.VM_NAME }}
       run: |
-        echo "Review the logs for 'Execute IIS Certificate Update Script on VM SamuelKV' step to confirm script outcome."
+        echo "Review the logs for the 'Execute IIS Certificate Update Script on VM ${{ steps.extract_params.outputs.VM_NAME }}' step to confirm the PowerShell script's outcome."
+        echo "Look for '--- Standard Output (STDOUT) ---' and '--- Standard Error (STDERR) ---' sections."
