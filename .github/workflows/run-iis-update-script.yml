@@ -73,9 +73,9 @@ jobs:
         echo "Found files JSON: $FILES_JSON"
         # Set the output variable 'files_json' for subsequent jobs to consume.
         # Using the multi-line syntax for GITHUB_OUTPUT to correctly handle JSON with newlines.
-        echo "files_json<<EOF" >> "$GITHUB_OUTPUT"
+        echo "files_json<<EOF_JSON" >> "$GITHUB_OUTPUT"
         echo "$FILES_JSON" >> "$GITHUB_OUTPUT"
-        echo "EOF" >> "$GITHUB_OUTPUT"
+        echo "EOF_JSON" >> "$GITHUB_OUTPUT"
       shell: bash # Specifies the shell to execute the 'run' commands.
 
   # Job 2: Run the IIS certificate update for each VM parameter file found
@@ -149,7 +149,6 @@ jobs:
     - name: Execute IIS Certificate Update Script on VM ${{ steps.extract_params.outputs.VM_NAME }}
       id: run-script-on-vm # ID for this step.
       run: |
-        # Use the VM_NAME and RESOURCE_GROUP extracted in the previous step.
         VM_NAME="${{ steps.extract_params.outputs.VM_NAME }}"
         RESOURCE_GROUP="${{ steps.extract_params.outputs.RESOURCE_GROUP }}"
         POWERSHELL_SCRIPT_PATH="scripts/Update-IisCertBindings.ps1"
@@ -184,27 +183,26 @@ jobs:
         echo ""
         echo "--- PowerShell Script Output from VM ---"
 
-        # Parse the JSON output from az vm run-command invoke to extract stdout and stderr.
-        # It typically returns an array in 'value'. Stdout is often the first element, stderr the second.
-        # We also use 'select' to explicitly find messages with 'ComponentStatus/StdOut/succeeded' or 'StdErr'.
-        if echo "$AZ_RUN_COMMAND_OUTPUT" | jq -e '.value[0]' > /dev/null; then
-          SCRIPT_STDOUT=$(echo "$AZ_RUN_COMMAND_OUTPUT" | jq -r '.value[] | select(.code == "ComponentStatus/StdOut/succeeded").message' 2>/dev/null || echo "")
-          SCRIPT_STDERR=$(echo "$AZ_RUN_COMMAND_OUTPUT" | jq -r '.value[] | select(.code == "ComponentStatus/StdErr/succeeded").message' 2>/dev/null || echo "")
+        LOCAL_STDOUT=""
+        LOCAL_STDERR=""
 
-          # Fallback to generic array indexing if specific 'code' is not found (for older CLI versions or different outputs).
-          if [ -z "$SCRIPT_STDOUT" ] && [ -z "$SCRIPT_STDERR" ]; then
-            SCRIPT_STDOUT=$(echo "$AZ_RUN_COMMAND_OUTPUT" | jq -r '.value[0].message' 2>/dev/null || echo "")
-            SCRIPT_STDERR=$(echo "$AZ_RUN_COMMAND_OUTPUT" | jq -r '.value[1].message' 2>/dev/null || echo "")
+        if echo "$AZ_RUN_COMMAND_OUTPUT" | jq -e '.value[0]' > /dev/null; then
+          LOCAL_STDOUT=$(echo "$AZ_RUN_COMMAND_OUTPUT" | jq -r '.value[] | select(.code == "ComponentStatus/StdOut/succeeded").message' 2>/dev/null || echo "")
+          LOCAL_STDERR=$(echo "$AZ_RUN_COMMAND_OUTPUT" | jq -r '.value[] | select(.code == "ComponentStatus/StdErr/succeeded").message' 2>/dev/null || echo "")
+
+          if [ -z "$LOCAL_STDOUT" ] && [ -z "$LOCAL_STDERR" ]; then
+            LOCAL_STDOUT=$(echo "$AZ_RUN_COMMAND_OUTPUT" | jq -r '.value[0].message' 2>/dev/null || echo "")
+            LOCAL_STDERR=$(echo "$AZ_RUN_COMMAND_OUTPUT" | jq -r '.value[1].message' 2>/dev/null || echo "")
           fi
 
           echo "--- Standard Output (STDOUT) ---"
-          echo "$SCRIPT_STDOUT"
+          echo "$LOCAL_STDOUT"
           echo "--------------------------------"
 
-          if [ -n "$SCRIPT_STDERR" ]; then
-            echo "" # Add a newline for better readability if stderr exists.
+          if [ -n "$LOCAL_STDERR" ]; then
+            echo ""
             echo "--- Standard Error (STDERR) ---"
-            echo "$SCRIPT_STDERR"
+            echo "$LOCAL_STDERR"
             echo "-------------------------------"
           else
             echo "No Standard Error (STDERR) reported."
@@ -219,11 +217,59 @@ jobs:
         fi
         echo "------------------------------"
 
+        # Make STDOUT and STDERR content available as outputs of this step
+        echo "stdout_content<<EOF_STDOUT" >> "$GITHUB_OUTPUT"
+        echo "$LOCAL_STDOUT" >> "$GITHUB_OUTPUT"
+        echo "EOF_STDOUT" >> "$GITHUB_OUTPUT"
+
+        echo "stderr_content<<EOF_STDERR" >> "$GITHUB_OUTPUT"
+        echo "$LOCAL_STDERR" >> "$GITHUB_OUTPUT"
+        echo "EOF_STDERR" >> "$GITHUB_OUTPUT"
+
       env:
         IIS_SCRIPT_PATH: scripts/Update-IisCertBindings.ps1 # This environment variable is for documentation/clarity here;
                                                            # the script content is read directly via 'cat'.
 
-    - name: Final Confirmation Message for ${{ steps.extract_params.outputs.VM_NAME }}
-      run: |
-        echo "Review the logs for the 'Execute IIS Certificate Update Script on VM ${{ steps.extract_params.outputs.VM_NAME }}' step (above this message) to confirm the PowerShell script's outcome."
-        echo "Look for '--- Standard Output (STDOUT) ---' and '--- Standard Error (STDERR) ---' sections within that step's logs."
+    # New Step: Send Email Notification
+    - name: Send Email Notification for ${{ steps.extract_params.outputs.VM_NAME }}
+      # This step will always run (if the job reaches here) to provide notification
+      # We check the outcome and script output to tailor the email content.
+      if: always()
+      uses: dawidd6/action-send-mail@v3 # Using a popular third-party email action
+      with:
+        server_address: ${{ secrets.MAIL_SERVER }}
+        server_port: ${{ secrets.MAIL_PORT }}
+        username: ${{ secrets.MAIL_USERNAME }}
+        password: ${{ secrets.MAIL_PASSWORD }}
+        to: ${{ secrets.MAIL_TO }}
+        from: ${{ secrets.MAIL_FROM }}
+        # Dynamically set subject and body based on workflow and script outcome
+        subject: |
+          IIS Cert Update for VM ${{ steps.extract_params.outputs.VM_NAME }} - ${{ job.status }}
+          ${{ contains(steps.run-script-on-vm.outputs.stdout_content, 'UpdateStatus: Changes Applied Successfully') && '✅ Update Applied' || '' }}
+          ${{ contains(steps.run-script-on-vm.outputs.stdout_content, 'UpdateStatus: No Changes Needed') && 'ℹ️ No Changes Needed' || '' }}
+          ${{ contains(steps.run-script-on-vm.outputs.stderr_content, '') || '❌ Errors Reported' }} # Check if stderr is NOT empty
+
+        body: |
+          Hello,
+
+          The IIS Certificate Update workflow for VM: ${{ steps.extract_params.outputs.VM_NAME }}
+          (Resource Group: ${{ steps.extract_params.outputs.RESOURCE_GROUP }}) has completed.
+
+          --- Overall Job Status ---
+          Status: ${{ job.status }}
+          Script Execution Outcome (of 'Execute IIS Certificate Update Script' step): ${{ steps.run-script-on-vm.outcome }}
+
+          --- Script Update Status ---
+          ${{ contains(steps.run-script-on-vm.outputs.stdout_content, 'UpdateStatus: Changes Applied Successfully') && '✅ The PowerShell script reported that certificate bindings were successfully updated on the VM.' || '' }}
+          ${{ contains(steps.run-script-on-vm.outputs.stdout_content, 'UpdateStatus: No Changes Needed') && 'ℹ️ The PowerShell script reported that no certificate binding updates were needed on the VM.' || '' }}
+          ${{ (! contains(steps.run-script-on-vm.outputs.stdout_content, 'UpdateStatus: Changes Applied Successfully') && ! contains(steps.run-script-on-vm.outputs.stdout_content, 'UpdateStatus: No Changes Needed')) && '❓ The PowerShell script did not report a clear update status. Please review logs.' || '' }}
+
+          --- PowerShell Script Standard Output ---
+          ${{ steps.run-script-on-vm.outputs.stdout_content }}
+
+          --- PowerShell Script Standard Error ---
+          ${{ steps.run-script-on-vm.outputs.stderr_content }}
+
+          You can view the full workflow run details here:
+          ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
