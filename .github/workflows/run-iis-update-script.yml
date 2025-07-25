@@ -232,13 +232,13 @@ jobs:
 
     - name: Send Email Notification for ${{ steps.extract_params.outputs.VM_NAME }}
       # This 'if' condition now controls when the email is sent:
-      # - The PowerShell script reported an update (contains 'UpdateStatus: Changes Applied Successfully')
+      # - The PowerShell script reported an update (contains 'Successfully updated binding')
       # OR
       # - The 'run-script-on-vm' step failed (outcome == 'failure')
       # OR
       # - The PowerShell script reported content to stderr (stderr_content != '')
       if: |
-        contains(steps.run-script-on-vm.outputs.stdout_content, 'UpdateStatus: Changes Applied Successfully') ||
+        contains(steps.run-script-on-vm.outputs.stdout_content, 'Successfully updated binding') ||
         steps.run-script-on-vm.outcome == 'failure' ||
         steps.run-script-on-vm.outputs.stderr_content != ''
       uses: dawidd6/action-send-mail@v3
@@ -251,9 +251,9 @@ jobs:
         from: ${{ secrets.MAIL_FROM }}
         subject: |
           IIS Cert Update for VM ${{ steps.extract_params.outputs.VM_NAME }} - ${{ job.status }}
-          ${{ contains(steps.run-script-on-vm.outputs.stdout_content, 'UpdateStatus: Changes Applied Successfully') && '✅ Update Applied' || '' }}
-          ${{ contains(steps.run-script-on-vm.outputs.stdout_content, 'UpdateStatus: No Changes Needed') && 'ℹ️ No Changes Needed' || '' }}
-          ${{ steps.run-script-on-vm.outputs.stderr_content != '' && '❌ Errors Reported' || '' }} # THIS LINE IS THE CORRECTION
+          ${{ contains(steps.run-script-on-vm.outputs.stdout_content, 'Successfully updated binding') && '✅ Update Applied' || '' }}
+          ${{ contains(steps.run-script-on-vm.outputs.stdout_content, 'No HTTPS bindings found') && 'ℹ️ No Changes Needed' || '' }}
+          ${{ steps.run-script-on-vm.outputs.stderr_content != '' && '❌ Errors Reported' || '' }}
 
         body: |
           Hello,
@@ -266,9 +266,9 @@ jobs:
           Script Execution Outcome (of 'Execute IIS Certificate Update Script' step): ${{ steps.run-script-on-vm.outcome }}
 
           --- Script Update Status ---
-          ${{ contains(steps.run-script-on-vm.outputs.stdout_content, 'UpdateStatus: Changes Applied Successfully') && '✅ The PowerShell script reported that certificate bindings were successfully updated on the VM.' || '' }}
-          ${{ contains(steps.run-script-on-vm.outputs.stdout_content, 'UpdateStatus: No Changes Needed') && 'ℹ️ The PowerShell script reported that no certificate binding updates were needed on the VM.' || '' }}
-          ${{ (! contains(steps.run-script-on-vm.outputs.stdout_content, 'UpdateStatus: No Changes Needed') && ! contains(steps.run-script-on-vm.outputs.stdout_content, 'UpdateStatus: Changes Applied Successfully')) && 'The PowerShell script did not report an error in status update. Please review logs if needed.' || '' }}
+          ${{ contains(steps.run-script-on-vm.outputs.stdout_content, 'Successfully updated binding') && '✅ The PowerShell script reported that certificate bindings were successfully updated on the VM.' || '' }}
+          ${{ contains(steps.run-script-on-vm.outputs.stdout_content, 'No HTTPS bindings found') && 'ℹ️ The PowerShell script reported that no certificate binding updates were needed on the VM.' || '' }}
+          ${{ (! contains(steps.run-script-on-vm.outputs.stdout_content, 'Successfully updated binding') && ! contains(steps.run-script-on-vm.outputs.stdout_content, 'No HTTPS bindings found')) && '❓ The PowerShell script did not report a clear update status. Please review logs.' || '' }}
 
           --- PowerShell Script Standard Output ---
           ${{ steps.run-script-on-vm.outputs.stdout_content }}
