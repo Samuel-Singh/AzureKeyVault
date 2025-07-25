@@ -230,12 +230,18 @@ jobs:
         IIS_SCRIPT_PATH: scripts/Update-IisCertBindings.ps1 # This environment variable is for documentation/clarity here;
                                                            # the script content is read directly via 'cat'.
 
-    # New Step: Send Email Notification
     - name: Send Email Notification for ${{ steps.extract_params.outputs.VM_NAME }}
-      # This step will always run (if the job reaches here) to provide notification
-      # We check the outcome and script output to tailor the email content.
-      if: always()
-      uses: dawidd6/action-send-mail@v3 # Using a popular third-party email action
+      # This 'if' condition now controls when the email is sent:
+      # - The PowerShell script reported an update (contains 'UpdateStatus: Changes Applied Successfully')
+      # OR
+      # - The 'run-script-on-vm' step failed (outcome == 'failure')
+      # OR
+      # - The PowerShell script reported content to stderr (stderr_content != '')
+      if: |
+        contains(steps.run-script-on-vm.outputs.stdout_content, 'UpdateStatus: Changes Applied Successfully') ||
+        steps.run-script-on-vm.outcome == 'failure' ||
+        steps.run-script-on-vm.outputs.stderr_content != ''
+      uses: dawidd6/action-send-mail@v3
       with:
         server_address: ${{ secrets.MAIL_SERVER }}
         server_port: ${{ secrets.MAIL_PORT }}
@@ -262,7 +268,7 @@ jobs:
           --- Script Update Status ---
           ${{ contains(steps.run-script-on-vm.outputs.stdout_content, 'UpdateStatus: Changes Applied Successfully') && '✅ The PowerShell script reported that certificate bindings were successfully updated on the VM.' || '' }}
           ${{ contains(steps.run-script-on-vm.outputs.stdout_content, 'UpdateStatus: No Changes Needed') && 'ℹ️ The PowerShell script reported that no certificate binding updates were needed on the VM.' || '' }}
-          ${{ (! contains(steps.run-script-on-vm.outputs.stdout_content, 'UpdateStatus: Changes Applied Successfully') && ! contains(steps.run-script-on-vm.outputs.stdout_content, 'UpdateStatus: No Changes Needed')) && '❓ The PowerShell script did not report a clear update status. Please review logs.' || '' }}
+          ${{ (! contains(steps.run-script-on-vm.outputs.stdout_content, 'UpdateStatus: No Changes Needed') && ! contains(steps.run-script-on-vm.outputs.stdout_content, 'UpdateStatus: Changes Applied Successfully')) && 'The PowerShell script did not report an error in status update. Please review logs if needed.' || '' }}
 
           --- PowerShell Script Standard Output ---
           ${{ steps.run-script-on-vm.outputs.stdout_content }}
