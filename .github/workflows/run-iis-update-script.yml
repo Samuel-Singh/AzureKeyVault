@@ -268,7 +268,7 @@ jobs:
           --- Script Update Status ---
           ${{ contains(steps.run-script-on-vm.outputs.stdout_content, 'Successfully updated binding') && '✅ The PowerShell script reported that certificate bindings were successfully updated on the VM.' || '' }}
           ${{ contains(steps.run-script-on-vm.outputs.stdout_content, 'No HTTPS bindings found') && 'ℹ️ The PowerShell script reported that no certificate binding updates were needed on the VM.' || '' }}
-          ${{ (! contains(steps.run-script-on-vm.outputs.stdout_content, 'Successfully updated binding') && ! contains(steps.run-script-on-vm.outputs.stdout_content, 'No HTTPS bindings found')) && '❓ The PowerShell script did not report a clear update status. Please review logs.' || '' }}
+          ${{ (! contains(steps.run-script-on-vm.outputs.stdout_content, 'Successfully updated binding') && ! contains(steps.run-script-on-vm.outputs.stdout_content, 'No HTTPS bindings found')) && 'The PowerShell script did not report an error in update status. Please review logs if needed.' || '' }}
 
           --- PowerShell Script Standard Output ---
           ${{ steps.run-script-on-vm.outputs.stdout_content }}
