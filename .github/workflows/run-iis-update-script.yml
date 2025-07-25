@@ -243,12 +243,11 @@ jobs:
         password: ${{ secrets.MAIL_PASSWORD }}
         to: ${{ secrets.MAIL_TO }}
         from: ${{ secrets.MAIL_FROM }}
-        # Dynamically set subject and body based on workflow and script outcome
         subject: |
           IIS Cert Update for VM ${{ steps.extract_params.outputs.VM_NAME }} - ${{ job.status }}
           ${{ contains(steps.run-script-on-vm.outputs.stdout_content, 'UpdateStatus: Changes Applied Successfully') && '✅ Update Applied' || '' }}
           ${{ contains(steps.run-script-on-vm.outputs.stdout_content, 'UpdateStatus: No Changes Needed') && 'ℹ️ No Changes Needed' || '' }}
-          ${{ contains(steps.run-script-on-vm.outputs.stderr_content, '') || '❌ Errors Reported' }} # Check if stderr is NOT empty
+          ${{ steps.run-script-on-vm.outputs.stderr_content != '' && '❌ Errors Reported' || '' }} # THIS LINE IS THE CORRECTION
 
         body: |
           Hello,
