@@ -260,7 +260,6 @@ jobs:
           Script Execution Outcome (of 'Execute IIS Certificate Update Script' step): ${{ steps.run-script-on-vm.outcome }}
 
           --- Script Update Status ---
-          # This section is updated to show only one status based on priority
           ${{ contains(steps.run-script-on-vm.outputs.stdout_content, 'Successfully updated binding') && '✅ The PowerShell script reported that certificate bindings were successfully updated on the VM.' || 
              (contains(steps.run-script-on-vm.outputs.stdout_content, 'No HTTPS bindings found') && !contains(steps.run-script-on-vm.outputs.stdout_content, 'Successfully updated binding')) && 'ℹ️ The PowerShell script reported that no certificate binding updates were needed on the VM.' ||
              (! contains(steps.run-script-on-vm.outputs.stdout_content, 'Successfully updated binding') && ! contains(steps.run-script-on-vm.outputs.stdout_content, 'No HTTPS bindings found')) && '❓ The PowerShell script did not report a clear update status. Please review logs.' || '' }}
