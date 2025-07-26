@@ -169,15 +169,13 @@ jobs:
         # Invoke the Azure VM run command.
         # --scripts expects the raw content of the PowerShell script.
         # --output json ensures the response is in JSON format for parsing.
-        # --only-show-errors (optional) can reduce verbosity from Azure CLI itself,
-        # but we're parsing the full JSON output anyway.
+        # NOTE: --only-show-errors affects Azure CLI's own output, not the script's stdout/stderr.
         AZ_RUN_COMMAND_OUTPUT=$(az vm run-command invoke \
           --resource-group "$RESOURCE_GROUP" \
           --name "$VM_NAME" \
           --command-id RunPowerShellScript \
           --scripts "$(cat "$POWERSHELL_SCRIPT_PATH")" \
-          --output json \
-          --only-show-errors
+          --output json
         )
 
         echo ""
@@ -186,37 +184,50 @@ jobs:
         LOCAL_STDOUT=""
         LOCAL_STDERR=""
 
+        # Check if the overall command was successful and has expected output structure
         if echo "$AZ_RUN_COMMAND_OUTPUT" | jq -e '.value[0]' > /dev/null; then
-          # Extract stdout (which should now be primarily JSON from the PS script)
-          LOCAL_STDOUT=$(echo "$AZ_RUN_COMMAND_OUTPUT" | jq -r '.value[] | select(.code == "ComponentStatus/StdOut/succeeded").message' 2>/dev/null || echo "")
-          # Extract stderr (for other warnings/errors from PS script)
-          LOCAL_STDERR=$(echo "$AZ_RUN_COMMAND_OUTPUT" | jq -r '.value[] | select(.code == "ComponentStatus/StdErr/succeeded").message' 2>/dev/null || echo "")
+            # Attempt to extract messages based on their 'code'
+            # ComponentStatus/StdOut/succeeded for script's stdout
+            LOCAL_STDOUT=$(echo "$AZ_RUN_COMMAND_OUTPUT" | jq -r '.value[] | select(.code == "ComponentStatus/StdOut/succeeded").message' 2>/dev/null || echo "")
+            # ComponentStatus/StdErr/succeeded for script's stderr
+            LOCAL_STDERR=$(echo "$AZ_RUN_COMMAND_OUTPUT" | jq -r '.value[] | select(.code == "ComponentStatus/StdErr/succeeded").message' 2>/dev/null || echo "")
 
-          # Fallback for older Azure CLI output formats or if only one stream is present
-          if [ -z "$LOCAL_STDOUT" ] && [ -z "$LOCAL_STDERR" ]; then
-            LOCAL_STDOUT=$(echo "$AZ_RUN_COMMAND_OUTPUT" | jq -r '.value[0].message' 2>/dev/null || echo "")
-            LOCAL_STDERR=$(echo "$AZ_RUN_COMMAND_OUTPUT" | jq -r '.value[1].message' 2>/dev/null || echo "")
-          fi
+            # Fallback for some scenarios where stdout/stderr might be combined or simpler
+            # This part might not be needed if the above `jq` correctly separates
+            # but is kept for robustness. Ensure the most specific `jq` comes first.
+            if [ -z "$LOCAL_STDOUT" ] && [ -z "$LOCAL_STDERR" ]; then
+              # This might happen if 'az vm run-command' gives a generic error message
+              # or an older format without explicit stdout/stderr codes.
+              # In this case, dump all messages into stderr for review.
+              LOCAL_STDERR=$(echo "$AZ_RUN_COMMAND_OUTPUT" | jq -r '.value[].message' 2>/dev/null || echo "Unknown error output format.")
+            fi
 
-          echo "--- Standard Output (STDOUT - Should be JSON) ---"
-          echo "$LOCAL_STDOUT"
-          echo "-------------------------------------------------"
+            echo "--- Standard Output (STDOUT - Should be JSON) ---"
+            echo "$LOCAL_STDOUT"
+            echo "-------------------------------------------------"
 
-          if [ -n "$LOCAL_STDERR" ]; then
-            echo ""
-            echo "--- Standard Error (STDERR) ---"
-            echo "$LOCAL_STDERR"
-            echo "-------------------------------"
-          else
-            echo "No Standard Error (STDERR) reported."
-          fi
+            if [ -n "$LOCAL_STDERR" ]; then
+              echo ""
+              echo "--- Standard Error (STDERR) ---"
+              echo "$LOCAL_STDERR"
+              echo "-------------------------------"
+            else
+              echo "No Standard Error (STDERR) reported by script."
+            fi
         else
-          # This block executes if the JSON output from 'az vm run-command invoke' was unexpected or empty.
-          echo "Error: Could not parse expected output from 'az vm run-command invoke'."
-          echo "This might indicate an issue with the command execution, network, or an unexpected JSON response format."
-          echo "Full JSON output received:"
-          echo "$AZ_RUN_COMMAND_OUTPUT"
-          exit 1 # Fail this step, as we couldn't get proper output.
+            # This block executes if the JSON output from 'az vm run-command invoke' was unexpected or empty.
+            echo "Error: Could not parse expected output from 'az vm run-command invoke'." -1>&2 # Redirect to stderr
+            echo "This might indicate an issue with the command execution, network, or an unexpected JSON response format." -1>&2
+            echo "Full JSON output received:" -1>&2
+            echo "$AZ_RUN_COMMAND_OUTPUT" -1>&2 # Dump full output to stderr
+            
+            # Set stderr_content for email notification
+            echo "stderr_content<<EOF_STDERR_ERROR" >> "$GITHUB_OUTPUT"
+            echo "Error: Failed to invoke Azure VM run command or parse its output." >> "$GITHUB_OUTPUT"
+            echo "$AZ_RUN_COMMAND_OUTPUT" >> "$GITHUB_OUTPUT"
+            echo "EOF_STDERR_ERROR" >> "$GITHUB_OUTPUT"
+
+            exit 1 # Fail this step, as we couldn't get proper output.
         fi
         echo "------------------------------"
 
@@ -246,7 +257,7 @@ jobs:
         if echo "$SITE_STATUS_JSON" | jq -e . > /dev/null; then
           # Parse the JSON and iterate over each item
           # This creates a formatted string for the email body
-          EMAIL_BODY_STATUS=$(echo "$SITE_STATUS_JSON" | jq -r '.[] | 
+          EMAIL_BODY_STATUS=$(echo "$SITE_STATUS_JSON" | jq -r '.[] |
             "  Site: \(.SiteName)\n    Status: \(.Status)\n    Details: \(.Details)\n"
           ')
 
