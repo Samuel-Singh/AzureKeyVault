@@ -1,105 +1,5 @@
-name: IIS Certificate Update (Scheduled & Manual - Basic)
-
-on:
-  schedule:
-    - cron: '30 * * * *' # Every hour at 30 minutes past the hour (UTC)
-
-  workflow_dispatch:
-    inputs:
-      vm_params_glob:
-        description: 'Glob pattern for VM parameters JSON files (e.g., bicep/Virtual-Machines/*-params.json)'
-        required: false
-        default: 'bicep/Virtual-Machines/*.json'
-
-jobs:
-  find-vm-param-files:
-    runs-on: ubuntu-latest
-    outputs:
-      vm_param_files: ${{ steps.get_files.outputs.files_json }}
-
-    steps:
-    - name: Checkout Repository
-      uses: actions/checkout@v4
-
-    - name: Get VM Parameter Files
-      id: get_files
-      run: |
-        if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
-          GLOB_PATTERN="${{ github.event.inputs.vm_params_glob }}"
-          if [ -z "$GLOB_PATTERN" ]; then
-            GLOB_PATTERN="bicep/Virtual-Machines/*.json"
-            echo "Warning: No glob pattern provided for manual dispatch. Using default: $GLOB_PATTERN"
-          fi
-        else
-          GLOB_PATTERN="bicep/Virtual-Machines/*.json"
-        fi
-
-        echo "Searching for parameter files matching: $GLOB_PATTERN"
-        FILES_JSON=$(find "$(dirname "$GLOB_PATTERN")" -maxdepth 1 -name "$(basename "$GLOB_PATTERN")" -type f -print0 | jq -R -s 'split("\u0000") | map(select(length > 0))')
-
-        if [ "$FILES_JSON" == "[]" ]; then
-          echo "No files found matching '$GLOB_PATTERN'. Exiting gracefully as no VMs need processing."
-          exit 0
-        fi
-
-        echo "Found files JSON: $FILES_JSON"
-        echo "files_json<<EOF_JSON" >> "$GITHUB_OUTPUT"
-        echo "$FILES_JSON" >> "$GITHUB_OUTPUT"
-        echo "EOF_JSON" >> "$GITHUB_OUTPUT"
-      shell: bash
-
-  update-iis-cert:
-    if: needs.find-vm-param-files.outputs.vm_param_files != '[]'
-    needs: find-vm-param-files
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        vm_params_file: ${{ fromJson(needs.find-vm-param-files.outputs.vm_params_file) }}
-
-    environment:
-      name: Production # Or whatever environment you use
-
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Azure Login
-      uses: azure/login@v1
-      with:
-        creds: ${{ secrets.AZURE_CREDENTIALS }}
-
-    - name: Extract VM Name and Resource Group from Parameter File
-      id: extract_params
-      run: |
-        PARAM_FILE="${{ matrix.vm_params_file }}"
-        echo "Reading parameters from: $PARAM_FILE"
-
-        if [ ! -f "$PARAM_FILE" ]; then
-          echo "Error: Parameter file not found at $PARAM_FILE. This should not happen if 'find-vm-param-files' was successful."
-          exit 1
-        fi
-
-        VM_NAME=$(jq -r '.parameters.vmName.value' "$PARAM_FILE")
-        if [ -z "$VM_NAME" ]; then
-          echo "Error: 'vmName' not found in $PARAM_FILE or is empty. Please check the parameter file format."
-          exit 1
-        fi
-
-        RESOURCE_GROUP=$(jq -r '.targetResourceGroup' "$PARAM_FILE")
-        if [ -z "$RESOURCE_GROUP" ]; then
-          echo "Error: 'targetResourceGroup' not found in $PARAM_FILE or is empty. Please check the parameter file format."
-          exit 1
-        fi
-
-        echo "Extracted VM Name: $VM_NAME"
-        echo "Extracted Resource Group: $RESOURCE_GROUP"
-        echo "VM_NAME=$VM_NAME" >> "$GITHUB_OUTPUT"
-        echo "RESOURCE_GROUP=$RESOURCE_GROUP" >> "$GITHUB_OUTPUT"
-      shell: bash
-
-    - name: Execute IIS Certificate Update Script on VM ${{ steps.extract_params.outputs.VM_NAME }}
-      id: run-script-on-vm
+- name: Execute IIS Certificate Update Script on VM ${{ steps.extract_params.outputs.VM_NAME }}
+      id: run-script-on-vm # ID for this step.
       run: |
         VM_NAME="${{ steps.extract_params.outputs.VM_NAME }}"
         RESOURCE_GROUP="${{ steps.extract_params.outputs.RESOURCE_GROUP }}"
@@ -117,64 +17,74 @@ jobs:
 
         echo "Attempting to execute PowerShell script on VM: $VM_NAME in Resource Group: $RESOURCE_GROUP"
 
-        # Execute the PowerShell script.
-        # The entire output (stdout + stderr from the script) will be captured by AZ_RUN_COMMAND_OUTPUT.
         AZ_RUN_COMMAND_OUTPUT=$(az vm run-command invoke \
           --resource-group "$RESOURCE_GROUP" \
           --name "$VM_NAME" \
           --command-id RunPowerShellScript \
           --scripts "$(cat "$POWERSHELL_SCRIPT_PATH")" \
-          --output json # Still use json output to capture message property
+          --output json
         )
 
         echo ""
-        echo "--- PowerShell Script Output from VM (Raw) ---"
+        echo "--- PowerShell Script Output from VM ---"
 
-        # Extract the 'message' property which contains the combined stdout/stderr of the PowerShell script
-        # This is simpler as we're not trying to split streams, just get the whole log.
-        SCRIPT_RAW_OUTPUT=$(echo "$AZ_RUN_COMMAND_OUTPUT" | jq -r '.value[].message' 2>/dev/null || echo "Failed to extract script output from Azure CLI JSON. Raw AZ CLI Output: $AZ_RUN_COMMAND_OUTPUT")
+        LOCAL_STDOUT=""
+        LOCAL_STDERR=""
 
-        echo "$SCRIPT_RAW_OUTPUT"
-        echo "----------------------------------------------"
+        # Check if the overall command was successful and has expected output structure
+        if echo "$AZ_RUN_COMMAND_OUTPUT" | jq -e '.value[0]' > /dev/null; then
+            # Attempt to extract messages based on their 'code'
+            # ComponentStatus/StdOut/succeeded for script's stdout
+            LOCAL_STDOUT=$(echo "$AZ_RUN_COMMAND_OUTPUT" | jq -r '.value[] | select(.code == "ComponentStatus/StdOut/succeeded").message' 2>/dev/null || echo "")
+            # ComponentStatus/StdErr/succeeded for script's stderr
+            LOCAL_STDERR=$(echo "$AZ_RUN_COMMAND_OUTPUT" | jq -r '.value[] | select(.code == "ComponentStatus/StdErr/succeeded").message' 2>/dev/null || echo "")
 
-        # Make the raw script output available as an output of this step
-        echo "script_output<<EOF_SCRIPT_OUTPUT" >> "$GITHUB_OUTPUT"
-        echo "$SCRIPT_RAW_OUTPUT" >> "$GITHUB_OUTPUT"
-        echo "EOF_SCRIPT_OUTPUT" >> "$GITHUB_OUTPUT"
+            # Fallback logic for older Azure CLI versions or unusual outputs,
+            # but the above two lines are the most critical for separation.
+            # If both are empty, and there's still something in the raw output,
+            # it means the `code` wasn't what we expected, so dump everything to stderr.
+            if [ -z "$LOCAL_STDOUT" ] && [ -z "$LOCAL_STDERR" ] && [ -n "$AZ_RUN_COMMAND_OUTPUT" ]; then
+              LOCAL_STDERR=$(echo "$AZ_RUN_COMMAND_OUTPUT" | jq -r '.value[].message' 2>/dev/null || echo "Unknown or unparseable output format from az vm run-command.")
+            fi
 
-      shell: bash # Use bash for consistency
 
-    - name: Send Email Notification for ${{ steps.extract_params.outputs.VM_NAME }}
-      # This step will ALWAYS run, even if previous steps in this job failed.
-      # This ensures you get an email about the outcome.
-      if: always()
-      uses: dawidd6/action-send-mail@v3
-      with:
-        server_address: ${{ secrets.MAIL_SERVER }}
-        server_port: ${{ secrets.MAIL_PORT }}
-        username: ${{ secrets.MAIL_USERNAME }}
-        password: ${{ secrets.MAIL_PASSWORD }}
-        to: ${{ secrets.MAIL_TO }}
-        from: ${{ secrets.MAIL_FROM }}
-        subject: |
-          IIS Cert Update for VM ${{ steps.extract_params.outputs.VM_NAME }} - ${{ job.status }}
-          ${{ (contains(github.job.status, 'failure') && '❌ Workflow Failed') || '' }}
-          ${{ (steps.run-script-on-vm.outcome == 'failure' && '❌ Script Step Failed') || '' }}
-          ${{ (contains(steps.run-script-on-vm.outputs.script_output, 'Successfully updated binding') && '✅ Updates Applied') || '' }}
-          ${{ (contains(steps.run-script-on-vm.outputs.script_output, 'Error updating binding') || contains(steps.run-script-on-vm.outputs.script_output, 'Failed to recycle')) && '⚠️ Warnings/Errors in Script Output' || '' }}
+            echo "--- Standard Output (STDOUT - Should be JSON) ---"
+            echo "$LOCAL_STDOUT"
+            echo "-------------------------------------------------"
 
-        body: |
-          Hello,
+            if [ -n "$LOCAL_STDERR" ]; then
+              echo ""
+              echo "--- Standard Error (STDERR) ---"
+              echo "$LOCAL_STDERR"
+              echo "-------------------------------"
+            else
+              echo "No Standard Error (STDERR) reported by script."
+            fi
+        else
+            # This block executes if the JSON output from 'az vm run-command invoke' was unexpected or empty.
+            echo "Error: Could not parse expected output from 'az vm run-command invoke'." -1>&2 # Redirect to stderr
+            echo "This might indicate an issue with the command execution, network, or an unexpected JSON response format." -1>&2
+            echo "Full JSON output received:" -1>&2
+            echo "$AZ_RUN_COMMAND_OUTPUT" -1>&2 # Dump full output to stderr
+            
+            # Set stderr_content for email notification
+            echo "stderr_content<<EOF_STDERR_ERROR" >> "$GITHUB_OUTPUT"
+            echo "Error: Failed to invoke Azure VM run command or parse its output." >> "$GITHUB_OUTPUT"
+            echo "$AZ_RUN_COMMAND_OUTPUT" >> "$GITHUB_OUTPUT"
+            echo "EOF_STDERR_ERROR" >> "$GITHUB_OUTPUT"
 
-          The IIS Certificate Update workflow for VM: ${{ steps.extract_params.outputs.VM_NAME }}
-          (Resource Group: ${{ steps.extract_params.outputs.RESOURCE_GROUP }}) has completed.
+            exit 1 # Fail this step, as we couldn't get proper output.
+        fi
+        echo "------------------------------"
 
-          --- Overall Job Status ---
-          Status: ${{ job.status }}
-          Script Execution Outcome (of 'Execute IIS Certificate Update Script' step): ${{ steps.run-script-on-vm.outcome }}
+        # Make STDOUT and STDERR content available as outputs of this step
+        echo "stdout_content<<EOF_STDOUT" >> "$GITHUB_OUTPUT"
+        echo "$LOCAL_STDOUT" >> "$GITHUB_OUTPUT"
+        echo "EOF_STDOUT" >> "$GITHUB_OUTPUT"
 
-          --- PowerShell Script Output ---
-          ${{ steps.run-script-on-vm.outputs.script_output }}
+        echo "stderr_content<<EOF_STDERR" >> "$GITHUB_OUTPUT"
+        echo "$LOCAL_STDERR" >> "$GITHUB_OUTPUT"
+        echo "EOF_STDERR" >> "$GITHUB_OUTPUT"
 
-          You can view the full workflow run details here:
-          ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      env:
+        IIS_SCRIPT_PATH: scripts/Update-IisCertBindings.ps1
