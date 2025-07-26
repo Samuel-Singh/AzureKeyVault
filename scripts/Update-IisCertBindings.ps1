@@ -1,13 +1,21 @@
+# scripts/Update-IisCertBindings.ps1
+
+# This script updates IIS HTTPS bindings to use the newest valid certificates
+# found in the LocalMachine\My certificate store.
+# All informational messages are written to StandardError,
+# and the final output (summary of site updates) is written to StandardOutput as JSON.
+
 # Requires the Microsoft.Web.Administration assembly (usually available on systems with IIS)
 
+# Write initial message to StandardError (for logging, not for JSON output)
 Write-Host "Starting IIS Certificate Binding Update script using Microsoft.Web.Administration..." -Stream StandardError
 
-# Array to hold results for each site processed
+# Array to hold structured results for each site processed
 $siteResults = @()
 
 try {
     # Load the Microsoft.Web.Administration assembly
-    # Using explicit path for robustness, as determined previously.
+    # Using explicit path for robustness. If this path differs on your VMs, adjust it.
     Add-Type -Path "C:\Windows\System32\inetsrv\Microsoft.Web.Administration.dll" -ErrorAction Stop
     Write-Host "Microsoft.Web.Administration assembly loaded successfully." -Stream StandardError
 
@@ -19,7 +27,7 @@ try {
     foreach ($site in $iisManager.Sites) {
         Write-Host "`n--- Processing Website: $($site.Name) ---" -Stream StandardError
 
-        # Variables to track status for the current site
+        # Variables to track status for the current site for the JSON output
         $currentSiteStatus = "No HTTPS bindings found or processed" # Default
         $currentSiteDetails = "No HTTPS bindings were found or processed for this site."
         $bindingUpdatedForSite = $false # Flag to track if any binding was updated for the current site
@@ -29,7 +37,6 @@ try {
 
         if (-not $httpsBindings) {
             Write-Host "  No HTTPS bindings found for site '$($site.Name)'. Skipping." -Stream StandardError
-            # Keep default status
             # Add to results even if no HTTPS bindings, to be explicit in report
             $siteResults += [PSCustomObject]@{
                 SiteName = $site.Name
@@ -41,7 +48,8 @@ try {
         
         # If HTTPS bindings are found, set initial status and details assuming no update yet
         $currentSiteStatus = "No Changes Needed"
-        $currentSiteDetails = "All HTTPS bindings for this site were already up-to-date, or only non-SNI bindings found."
+        $currentSiteDetails = "All applicable HTTPS bindings for this site were already up-to-date."
+
 
         foreach ($binding in $httpsBindings) {
             # --- Extract Host Header, IP, and Port from BindingInformation ---
@@ -57,11 +65,15 @@ try {
                 $hostHeader = $Matches.host # This will be an empty string if no host header (IP-based binding)
             } else {
                 Write-Warning "  Could not parse binding information '$bindingInfo' for site '$($site.Name)'. Skipping this binding." -Stream StandardError
+                # If a parsing error occurs for a binding, update overall site details
+                $currentSiteDetails = "Binding parsing error for '$bindingInfo': $($_.Exception.Message)"
                 continue
             }
 
             Write-Host "  DEBUG: Processing binding info: '$bindingInfo' (IP: '$currentIpAddress', Port: '$currentPort', Host: '$hostHeader')" -Stream StandardError
 
+            # For certificates typically from Key Vault (issued for hostnames), we focus on SNI bindings.
+            # Bindings without a host header are non-SNI/IP-based default SSL sites, which might have different update logic.
             if ([string]::IsNullOrEmpty($hostHeader) -or [string]::IsNullOrWhiteSpace($hostHeader)) {
                 Write-Host "  Skipping HTTPS binding '$bindingInfo' on site '$($site.Name)' because it lacks a host header (non-SNI). This script primarily targets host-header bindings." -Stream StandardError
                 continue
@@ -78,6 +90,8 @@ try {
                 # Check Subject Alternative Names (SAN)
                 $sanExtension = $_.Extensions | Where-Object { $_.Oid.FriendlyName -eq 'Subject Alternative Name' }
                 if ($sanExtension) {
+                    # Escape hostHeader for regex safety, and ensure it's a full match for an entry in SAN list
+                    # SAN entries are often like "DNS Name=example.com, DNS Name=www.example.com"
                     $sanMatches = ($sanExtension.Format(0) -match "DNS Name=$([regex]::Escape($hostHeader))")
                 }
                 
@@ -86,15 +100,18 @@ try {
                     $cnMatches = $true
                 }
 
+                # A certificate is a match if it's valid and its SAN or CN matches the host header
                 $isValidDate -and ($sanMatches -or $cnMatches)
             } | Sort-Object NotAfter -Descending
 
             if ($certs.Count -eq 0) {
                 Write-Host "    No valid certificate found in LocalMachine\My store for host '$hostHeader'. Current binding will not be updated." -Stream StandardError
+                # Update site details if no cert is found for a relevant binding
+                $currentSiteDetails = "No valid certificate found for '$hostHeader'. Binding skipped."
                 continue # Move to the next binding
             }
 
-            $newCert = $certs[0] # Get the newest, valid certificate
+            $newCert = $certs[0] # Get the newest, valid certificate (due to Sort-Object NotAfter -Descending)
             Write-Host "    Found newest valid certificate for '$hostHeader':" -Stream StandardError
             Write-Host "      Subject: $($newCert.Subject)" -Stream StandardError
             Write-Host "      Thumbprint: $($newCert.Thumbprint)" -Stream StandardError
@@ -120,13 +137,15 @@ try {
                     $binding.CertificateHash = $bytes.ToArray()
                     $binding.CertificateStoreName = "MY"
                     
-                    # Ensure SslFlags is set correctly for SNI (1 for SNI).
+                    # Ensure SslFlags is set correctly for SNI (1 for SNI). For host-header bindings, it should always be SNI.
                     $binding.SslFlags = 1
 
                     $iisManager.CommitChanges() # This commits changes to applicationHost.config and http.sys
                     Write-Host "    Successfully updated binding for '$hostHeader' on site '$($site.Name)'." -Stream StandardError
                     $bindingUpdatedForSite = $true # Mark that an update occurred for this site
-                    $currentSiteStatus = "Changes Applied Successfully" # Update site status
+                    
+                    # If any binding on the site is updated, the site's overall status should reflect this.
+                    $currentSiteStatus = "Changes Applied Successfully"
                     $currentSiteDetails = "Certificate binding updated for host '$hostHeader'. New thumbprint: $($newCert.Thumbprint)."
 
                 } catch {
@@ -134,7 +153,7 @@ try {
                     if ($_.Exception.InnerException) {
                         Write-Error "    Inner Exception: $($_.Exception.InnerException.Message)" -Stream StandardError
                     }
-                    # If an error occurs, set status to reflect that for the site.
+                    # If an error occurs during update, set status to reflect that for the site.
                     $currentSiteStatus = "Error During Update"
                     $currentSiteDetails = "Failed to update binding for '$hostHeader'. Error: $($_.Exception.Message)"
                 }
@@ -142,6 +161,7 @@ try {
         } # End foreach $binding
 
         # Application Pool Recycling Logic for the current site
+        # This block runs only if at least one binding in the current site was updated.
         if ($bindingUpdatedForSite) {
             Write-Host "  Attempting to recycle application pool for site '$($site.Name)'..." -Stream StandardError
             
@@ -172,8 +192,9 @@ try {
                         }
                     } catch {
                         Write-Warning "  Failed to recycle application pool '$($appPool.Name)'. Error: $($_.Exception.Message). Manual recycling might be needed for site '$($site.Name)'." -Stream StandardError
+                        # If app pool recycling fails after an update, set an appropriate status
                         if ($currentSiteStatus -ne "Error During Update") {
-                            $currentSiteStatus = "Changes Applied, AppPool Issue" # New status for this case
+                            $currentSiteStatus = "Changes Applied, AppPool Issue" # New status for this specific case
                         }
                         $currentSiteDetails += " App pool recycling failed: $($_.Exception.Message)."
                     }
@@ -211,10 +232,19 @@ catch {
     if ($_.Exception.InnerException) {
         Write-Error "Inner Exception: $($_.Exception.InnerException.Message)" -Stream StandardError
     }
-    # For a critical unhandled error, we still want to output an empty or error JSON
-    # so the GitHub Actions workflow doesn't fail on parsing missing stdout.
-    # A robust error handling would capture this into $siteResults as well.
-    # For now, we'll let the workflow's stderr check handle the email notification for this type of error.
+    
+    # In case of a critical unhandled error, ensure something is output to stdout,
+    # even if it's an error object, so the GitHub Actions YAML doesn't fail on empty stdout.
+    # It's better to provide an empty JSON array or an error object as JSON.
+    # For now, we will just let the script exit with an error code, and the YAML will catch stderr.
+    $siteResults += [PSCustomObject]@{
+        SiteName = "Overall Script Error"
+        Status   = "Critical Failure"
+        Details  = "An unhandled error occurred: $($_.Exception.Message). Check stderr for more details."
+    }
+    
+    # Output any collected results before exiting on critical error
+    $siteResults | ConvertTo-Json -Depth 5 -Compress
     exit 1 # Exit with a non-zero code to indicate overall script failure
 }
 
