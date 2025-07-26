@@ -1,175 +1,274 @@
-# Requires the Microsoft.Web.Administration assembly (usually available on systems with IIS)
+name: IIS Certificate Update (Scheduled & Manual)
 
-Write-Host "Starting IIS Certificate Binding Update script using Microsoft.Web.Administration..."
+on:
+  schedule:
+    # Runs every hour at 30 minutes past the hour. (UTC time)
+    # Adjust '30 * * * *' to your preferred schedule.
+    # For example:
+    #   '0 */4 * * *'  - Every 4 hours at minute 0
+    #   '0 0 * * *'    - Every day at midnight UTC
+    - cron: '30 * * * *'
 
-try {
-    # Load the Microsoft.Web.Administration assembly
-    # Using explicit path for robustness, as determined previously.
-    Add-Type -Path "C:\Windows\System32\inetsrv\Microsoft.Web.Administration.dll" -ErrorAction Stop
-    Write-Host "Microsoft.Web.Administration assembly loaded successfully."
+  workflow_dispatch:
+    inputs:
+      # This input allows specifying a glob pattern when manually dispatching the workflow.
+      # It's optional, allowing the default behavior (all .json files in the directory)
+      # to apply if no input is provided.
+      vm_params_glob:
+        description: 'Glob pattern for VM parameters JSON files (e.g., bicep/Virtual-Machines/*-params.json)'
+        required: false
+        default: 'bicep/Virtual-Machines/*.json' # Default value for manual trigger if left blank
 
-    # Create a ServerManager object to interact with IIS configuration
-    $iisManager = New-Object Microsoft.Web.Administration.ServerManager
-    Write-Host "ServerManager object created."
+jobs:
+  # Job 1: Find all VM parameter files matching the determined glob pattern
+  find-vm-param-files:
+    runs-on: ubuntu-latest
+    outputs:
+      # This output will be a JSON array of file paths (e.g., ["path/to/file1.json", "path/to/file2.json"])
+      vm_param_files: ${{ steps.get_files.outputs.files_json }}
 
-    # Iterate through all websites in IIS
-    foreach ($site in $iisManager.Sites) {
-        Write-Host "`n--- Processing Website: $($site.Name) ---"
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4 # Essential: Clones your repository onto the GitHub Actions runner.
 
-        # Flag to track if any binding was updated for the current site, to control app pool recycling
-        $bindingUpdatedForSite = $false 
+    - name: Get VM Parameter Files
+      id: get_files # Unique ID for this step, allowing its outputs to be referenced.
+      run: |
+        # Determine the glob pattern based on the event that triggered the workflow.
+        # If it's a workflow_dispatch event (manual run), use the provided input.
+        # Otherwise (e.g., scheduled run), use the default hardcoded pattern.
+        if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+          GLOB_PATTERN="${{ github.event.inputs.vm_params_glob }}"
+          # Fallback check if the input was empty (though 'default' handles this mostly)
+          if [ -z "$GLOB_PATTERN" ]; then
+            GLOB_PATTERN="bicep/Virtual-Machines/*.json" # Ensure a default is always set
+            echo "Warning: No glob pattern provided for manual dispatch. Using default: $GLOB_PATTERN"
+          fi
+        else
+          # Hardcoded pattern for scheduled runs
+          GLOB_PATTERN="bicep/Virtual-Machines/*.json" # Adjust this if your files have a more specific naming convention (e.g., '*-params.json')
+        fi
 
-        # Get all HTTPS bindings for the current website
-        $httpsBindings = $site.Bindings | Where-Object { $_.Protocol -eq "https" }
+        echo "Searching for parameter files matching: $GLOB_PATTERN"
 
-        if (-not $httpsBindings) {
-            Write-Host "  No HTTPS bindings found for site '$($site.Name)'. Skipping."
-            continue # Move to the next site if no HTTPS bindings are found
-        }
+        # Use 'find' to robustly locate files matching the glob.
+        # -maxdepth 1: Limits search to the specified directory (no subdirectories).
+        # -name "$(basename "$GLOB_PATTERN")": Uses the wildcard part of the glob (e.g., "*.json").
+        # -type f: Ensures only regular files are matched (not directories).
+        # -print0 and jq -R -s 'split("\u0000") | map(select(length > 0))':
+        #   -print0: Outputs file paths null-terminated, which safely handles spaces/special characters.
+        #   jq -R -s 'split("\u0000") | map(select(length > 0))':
+        #   - Reads null-separated strings as raw lines (-R).
+        #   - Slurps all inputs into one array (-s).
+        #   - Splits the input string by null characters (\u0000).
+        #   - Filters out any empty strings that might result from the split.
+        #   This creates a valid JSON array of file paths.
+        FILES_JSON=$(find "$(dirname "$GLOB_PATTERN")" -maxdepth 1 -name "$(basename "$GLOB_PATTERN")" -type f -print0 | jq -R -s 'split("\u0000") | map(select(length > 0))')
 
-        foreach ($binding in $httpsBindings) {
-            # --- Extract Host Header, IP, and Port from BindingInformation ---
-            $bindingInfo = $binding.BindingInformation
-            $hostHeader = ""
-            $currentIpAddress = "*" # Default IP, will be parsed if present
-            $currentPort = 443    # Default Port, will be parsed if present
+        if [ "$FILES_JSON" == "[]" ]; then
+          echo "No files found matching '$GLOB_PATTERN'. Exiting gracefully as no VMs need processing."
+          exit 0 # Exit successfully if no files are found; this prevents the dependent job from running.
+        fi
 
-            # Regex to parse binding information (e.g., "192.168.1.1:443:www.example.com" or "*:443:hostname")
-            # This robustly extracts IP, Port, and HostHeader
-            if ($bindingInfo -match '^(?<ip>.+?):(?<port>\d+)(?::(?<host>.*))?$') {
-                $currentIpAddress = $Matches.ip
-                $currentPort = $Matches.port
-                $hostHeader = $Matches.host # This will be an empty string if no host header (IP-based binding)
-            } else {
-                Write-Warning "  Could not parse binding information '$bindingInfo' for site '$($site.Name)'. Skipping this binding."
-                continue
-            }
+        echo "Found files JSON: $FILES_JSON"
+        # Set the output variable 'files_json' for subsequent jobs to consume.
+        # Using the multi-line syntax for GITHUB_OUTPUT to correctly handle JSON with newlines.
+        echo "files_json<<EOF_JSON" >> "$GITHUB_OUTPUT"
+        echo "$FILES_JSON" >> "$GITHUB_OUTPUT"
+        echo "EOF_JSON" >> "$GITHUB_OUTPUT"
+      shell: bash # Specifies the shell to execute the 'run' commands.
 
-            Write-Host "  DEBUG: Processing binding info: '$bindingInfo' (IP: '$currentIpAddress', Port: '$currentPort', Host: '$hostHeader')"
+  # Job 2: Run the IIS certificate update for each VM parameter file found
+  update-iis-cert:
+    # This job will only run if the 'find-vm-param-files' job successfully found files
+    # (i.e., its output 'vm_param_files' is not an empty JSON array '[]').
+    if: needs.find-vm-param-files.outputs.vm_param_files != '[]'
+    needs: find-vm-param-files # Declares a dependency on the 'find-vm-param-files' job.
+    runs-on: ubuntu-latest # Specifies the runner environment for this job.
 
-            # For certificates typically from Key Vault (issued for hostnames), we focus on SNI bindings.
-            # Bindings without a host header are non-SNI/IP-based default SSL sites, which might have different update logic.
-            if ([string]::IsNullOrEmpty($hostHeader) -or [string]::IsNullOrWhiteSpace($hostHeader)) {
-                Write-Host "  Skipping HTTPS binding '$bindingInfo' on site '$($site.Name)' because it lacks a host header (non-SNI). This script primarily targets host-header bindings."
-                continue
-            }
+    strategy:
+      fail-fast: false # Set to 'false' if you want all matrix jobs to attempt to run
+                       # even if one fails. Set to 'true' (default) to cancel
+                       # all other matrix jobs on the first failure.
+      matrix:
+        # The 'vm_params_file' matrix is dynamically populated from the JSON array
+        # output of the 'find-vm-param-files' job. 'fromJson' parses the string.
+        vm_params_file: ${{ fromJson(needs.find-vm-param-files.outputs.vm_param_files) }}
 
-            Write-Host "  Processing HTTPS binding for Host: $hostHeader (Site: $($site.Name))"
+    environment:
+      # Optional: Link this job to an environment (e.g., 'Production') for
+      # better visibility, deployment protection rules, or secrets management.
+      name: Production
 
-            # Find the newest valid certificate in the LocalMachine\My store that matches the host header (via SAN or CN)
-            $certs = Get-ChildItem -Path Cert:\LocalMachine\My | Where-Object {
-                $isValidDate = ($_.NotAfter -gt (Get-Date) -and $_.NotBefore -le (Get-Date))
-                $sanMatches = $false
-                $cnMatches = $false
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4 # Checks out your repository code into the runner's workspace.
 
-                # Check Subject Alternative Names (SAN)
-                $sanExtension = $_.Extensions | Where-Object { $_.Oid.FriendlyName -eq 'Subject Alternative Name' }
-                if ($sanExtension) {
-                    # Escape hostHeader for regex safety, and ensure it's a full match for an entry in SAN list
-                    # SAN entries are often like "DNS Name=example.com, DNS Name=www.example.com"
-                    $sanMatches = ($sanExtension.Format(0) -match "DNS Name=$([regex]::Escape($hostHeader))")
-                }
-                
-                # Check Common Name (CN) as a fallback
-                if ($_.Subject -match "CN=([^\,]+)" -and $Matches[1] -eq $hostHeader) {
-                    $cnMatches = $true
-                }
+    - name: Azure Login
+      uses: azure/login@v1 # Uses the Azure Login action to authenticate with Azure.
+      with:
+        # 'creds' should be a GitHub Secret containing your Azure Service Principal JSON.
+        # Example: {"clientId":"...", "clientSecret":"...", "subscriptionId":"...", "tenantId":"..."}
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-                # A certificate is a match if it's valid and its SAN or CN matches the host header
-                $isValidDate -and ($sanMatches -or $cnMatches)
-            } | Sort-Object NotAfter -Descending
+    - name: Extract VM Name and Resource Group from Parameter File
+      id: extract_params # ID to reference this step's outputs (VM_NAME, RESOURCE_GROUP).
+      run: |
+        # The current parameter file path for this matrix iteration.
+        PARAM_FILE="${{ matrix.vm_params_file }}"
+        echo "Reading parameters from: $PARAM_FILE"
 
-            if ($certs.Count -eq 0) {
-                Write-Host "    No valid certificate found in LocalMachine\My store for host '$hostHeader'. Current binding will not be updated."
-                continue # Move to the next binding
-            }
+        # Basic validation: ensure the parameter file exists.
+        if [ ! -f "$PARAM_FILE" ]; then
+          echo "Error: Parameter file not found at $PARAM_FILE. This should not happen if 'find-vm-param-files' was successful."
+          exit 1
+        fi
 
-            $newCert = $certs[0] # Get the newest, valid certificate (due to Sort-Object NotAfter -Descending)
-            Write-Host "    Found newest valid certificate for '$hostHeader':"
-            Write-Host "      Subject: $($newCert.Subject)"
-            Write-Host "      Thumbprint: $($newCert.Thumbprint)"
-            Write-Host "      NotAfter: $($newCert.NotAfter)"
+        # Extract 'vmName' using jq.
+        VM_NAME=$(jq -r '.parameters.vmName.value' "$PARAM_FILE")
+        if [ -z "$VM_NAME" ]; then
+          echo "Error: 'vmName' not found in $PARAM_FILE or is empty. Please check the parameter file format."
+          exit 1
+        fi
 
-            # Get the current binding's certificate hash as a string for comparison
-            $currentBindingHash = ""
-            if ($binding.CertificateHash) {
-                $currentBindingHash = [System.BitConverter]::ToString($binding.CertificateHash).Replace("-", "").ToUpper()
-            }
+        # Extract 'targetResourceGroup' using jq.
+        RESOURCE_GROUP=$(jq -r '.targetResourceGroup' "$PARAM_FILE")
+        if [ -z "$RESOURCE_GROUP" ]; then
+          echo "Error: 'targetResourceGroup' not found in $PARAM_FILE or is empty. Please check the parameter file format."
+          exit 1
+        fi
 
-            if ($currentBindingHash -eq $newCert.Thumbprint.ToUpper()) {
-                Write-Host "    Binding for '$hostHeader' already uses the newest certificate. No update needed."
-            } else {
-                Write-Host "    Outdated certificate found for '$hostHeader'. Updating binding..."
+        echo "Extracted VM Name: $VM_NAME"
+        echo "Extracted Resource Group: $RESOURCE_GROUP"
 
-                try {
-                    # Convert the new certificate's thumbprint (hex string) to a byte array
-                    $bytes = [System.Collections.Generic.List[byte]]::new()
-                    for ($i = 0; $i -lt $newCert.Thumbprint.Length; $i += 2) {
-                        $bytes.Add([byte]::Parse($newCert.Thumbprint.Substring($i, 2), [System.Globalization.NumberStyles]::HexNumber))
-                    }
-                    $binding.CertificateHash = $bytes.ToArray()
-                    $binding.CertificateStoreName = "MY"
-                    
-                    # Ensure SslFlags is set correctly for SNI (1 for SNI). For host-header bindings, it should always be SNI.
-                    $binding.SslFlags = 1 
+        # Output these variables so they can be used by subsequent steps in this job.
+        echo "VM_NAME=$VM_NAME" >> "$GITHUB_OUTPUT"
+        echo "RESOURCE_GROUP=$RESOURCE_GROUP" >> "$GITHUB_OUTPUT"
+      shell: bash
 
-                    $iisManager.CommitChanges() # This commits changes to applicationHost.config and http.sys
-                    Write-Host "    Successfully updated binding for '$hostHeader' on site '$($site.Name)'."
-                    $bindingUpdatedForSite = $true # Mark that an update occurred for this site
-                } catch {
-                    Write-Error "    Error updating binding for '$hostHeader' on site '$($site.Name)': $($_.Exception.Message)"
-                    if ($_.Exception.InnerException) {
-                        Write-Error "    Inner Exception: $($_.Exception.InnerException.Message)"
-                    }
-                }
-            }
-        } # End foreach $binding
+    - name: Execute IIS Certificate Update Script on VM ${{ steps.extract_params.outputs.VM_NAME }}
+      id: run-script-on-vm # ID for this step.
+      run: |
+        VM_NAME="${{ steps.extract_params.outputs.VM_NAME }}"
+        RESOURCE_GROUP="${{ steps.extract_params.outputs.RESOURCE_GROUP }}"
+        POWERSHELL_SCRIPT_PATH="scripts/Update-IisCertBindings.ps1"
 
-        # Application Pool Recycling Logic for the current site
-        # This block runs only if at least one binding in the current site was updated.
-        if ($bindingUpdatedForSite) {
-            Write-Host "  Attempting to recycle application pool for site '$($site.Name)'..."
-            
-            # Try to load WebAdministration module if not already loaded
-            if (-not (Get-Module -ListAvailable -Name WebAdministration)) {
-                try {
-                    Import-Module WebAdministration -ErrorAction SilentlyContinue
-                    Write-Host "  WebAdministration module loaded successfully (for app pool management)."
-                } catch {
-                    Write-Warning "  Could not load WebAdministration module for app pool management. Application pool recycling might fail for site '$($site.Name)'."
-                }
-            }
+        echo "--- Script Pre-check ---"
+        # Validate that the PowerShell script exists locally on the runner.
+        if [ ! -f "$POWERSHELL_SCRIPT_PATH" ]; then
+          echo "Error: PowerShell script not found at $POWERSHELL_SCRIPT_PATH."
+          echo "Please ensure it's in the 'scripts/' folder relative to your repository root."
+          exit 1
+        fi
+        echo "PowerShell script found: $POWERSHELL_SCRIPT_PATH"
+        echo "------------------------"
+        echo ""
 
-            # Check if Get-WebAppPool cmdlet is available after module import attempts
-            if (Get-Command -Name Get-WebAppPool -ErrorAction SilentlyContinue) {
-                $appPool = $site.Applications["/"].ApplicationPool
-                if ($appPool) {
-                    Write-Host "  Recycling application pool '$($appPool.Name)'..."
-                    try {
-                        Restart-WebAppPool -Name $appPool.Name -ErrorAction Stop
-                        Write-Host "  Application pool '$($appPool.Name)' recycled successfully for site '$($site.Name)'."
-                    } catch {
-                        Write-Warning "  Failed to recycle application pool '$($appPool.Name)'. Error: $($_.Exception.Message). Manual recycling might be needed for site '$($site.Name)'."
-                    }
-                } else {
-                    Write-Warning "  Could not find application pool for site '$($site.Name)'. Manual recycling might be needed."
-                }
-            } else {
-                Write-Warning "  Get-WebAppPool cmdlet is not available. Manual application pool recycling will be needed for site '$($site.Name)' if bindings were updated."
-            }
-        } else {
-            Write-Host "  No bindings updated for site '$($site.Name)'. Application pool recycling skipped."
-        }
+        echo "Attempting to execute PowerShell script on VM: $VM_NAME in Resource Group: $RESOURCE_GROUP"
 
-    } # End foreach $site
+        # Invoke the Azure VM run command.
+        # --scripts expects the raw content of the PowerShell script.
+        # --output json ensures the response is in JSON format for parsing.
+        # --only-show-errors (optional) can reduce verbosity from Azure CLI itself,
+        # but we're parsing the full JSON output anyway.
+        AZ_RUN_COMMAND_OUTPUT=$(az vm run-command invoke \
+          --resource-group "$RESOURCE_GROUP" \
+          --name "$VM_NAME" \
+          --command-id RunPowerShellScript \
+          --scripts "$(cat "$POWERSHELL_SCRIPT_PATH")" \
+          --output json \
+          --only-show-errors
+        )
 
-} # End outer try block
-catch {
-    Write-Error "An unhandled error occurred during IIS binding update process: $($_.Exception.Message)"
-    if ($_.Exception.InnerException) {
-        Write-Error "Inner Exception: $($_.Exception.InnerException.Message)"
-    }
-    exit 1
-}
+        echo ""
+        echo "--- PowerShell Script Output from VM ---"
 
-Write-Host "`nIIS Certificate Binding Update script finished for all processed sites."
+        LOCAL_STDOUT=""
+        LOCAL_STDERR=""
+
+        if echo "$AZ_RUN_COMMAND_OUTPUT" | jq -e '.value[0]' > /dev/null; then
+          LOCAL_STDOUT=$(echo "$AZ_RUN_COMMAND_OUTPUT" | jq -r '.value[] | select(.code == "ComponentStatus/StdOut/succeeded").message' 2>/dev/null || echo "")
+          LOCAL_STDERR=$(echo "$AZ_RUN_COMMAND_OUTPUT" | jq -r '.value[] | select(.code == "ComponentStatus/StdErr/succeeded").message' 2>/dev/null || echo "")
+
+          if [ -z "$LOCAL_STDOUT" ] && [ -z "$LOCAL_STDERR" ]; then
+            LOCAL_STDOUT=$(echo "$AZ_RUN_COMMAND_OUTPUT" | jq -r '.value[0].message' 2>/dev/null || echo "")
+            LOCAL_STDERR=$(echo "$AZ_RUN_COMMAND_OUTPUT" | jq -r '.value[1].message' 2>/dev/null || echo "")
+          fi
+
+          echo "--- Standard Output (STDOUT) ---"
+          echo "$LOCAL_STDOUT"
+          echo "--------------------------------"
+
+          if [ -n "$LOCAL_STDERR" ]; then
+            echo ""
+            echo "--- Standard Error (STDERR) ---"
+            echo "$LOCAL_STDERR"
+            echo "-------------------------------"
+          else
+            echo "No Standard Error (STDERR) reported."
+          fi
+        else
+          # This block executes if the JSON output from 'az vm run-command invoke' was unexpected or empty.
+          echo "Error: Could not parse expected output from 'az vm run-command invoke'."
+          echo "This might indicate an issue with the command execution, network, or an unexpected JSON response format."
+          echo "Full JSON output received:"
+          echo "$AZ_RUN_COMMAND_OUTPUT"
+          exit 1 # Fail this step, as we couldn't get proper output.
+        fi
+        echo "------------------------------"
+
+        # Make STDOUT and STDERR content available as outputs of this step
+        echo "stdout_content<<EOF_STDOUT" >> "$GITHUB_OUTPUT"
+        echo "$LOCAL_STDOUT" >> "$GITHUB_OUTPUT"
+        echo "EOF_STDOUT" >> "$GITHUB_OUTPUT"
+
+        echo "stderr_content<<EOF_STDERR" >> "$GITHUB_OUTPUT"
+        echo "$LOCAL_STDERR" >> "$GITHUB_OUTPUT"
+        echo "EOF_STDERR" >> "$GITHUB_OUTPUT"
+asdassasadas
+      env:
+        IIS_SCRIPT_PATH: scripts/Update-IisCertBindings.ps1 # This environment variable is for documentation/clarity here;
+                                                           # the script content is read directly via 'cat'.
+
+    - name: Send Email Notification for ${{ steps.extract_params.outputs.VM_NAME }}
+      if: |
+        contains(steps.run-script-on-vm.outputs.stdout_content, 'Successfully updated binding') ||
+        steps.run-script-on-vm.outcome == 'failure' ||
+        steps.run-script-on-vm.outputs.stderr_content != ''
+      uses: dawidd6/action-send-mail@v3
+      with:
+        server_address: ${{ secrets.MAIL_SERVER }}
+        server_port: ${{ secrets.MAIL_PORT }}
+        username: ${{ secrets.MAIL_USERNAME }}
+        password: ${{ secrets.MAIL_PASSWORD }}
+        to: ${{ secrets.MAIL_TO }}
+        from: ${{ secrets.MAIL_FROM }}
+        subject: |
+          IIS Cert Update for VM ${{ steps.extract_params.outputs.VM_NAME }} - ${{ job.status }}
+          ${{ contains(steps.run-script-on-vm.outputs.stdout_content, 'Successfully updated binding') && '✅ Update Applied' || '' }}
+          ${{ contains(steps.run-script-on-vm.outputs.stdout_content, 'No HTTPS bindings found') && 'ℹ️ No Changes Needed' || '' }}
+          ${{ steps.run-script-on-vm.outputs.stderr_content != '' && '❌ Errors Reported' || '' }}
+
+        body: |
+          Hello,
+
+          The IIS Certificate Update workflow for VM: ${{ steps.extract_params.outputs.VM_NAME }}
+          (Resource Group: ${{ steps.extract_params.outputs.RESOURCE_GROUP }}) has completed.
+
+          --- Overall Job Status ---
+          Status: ${{ job.status }}
+          Script Execution Outcome (of 'Execute IIS Certificate Update Script' step): ${{ steps.run-script-on-vm.outcome }}
+
+          --- Script Update Status ---
+          ${{ contains(steps.run-script-on-vm.outputs.stdout_content, 'Successfully updated binding') && '✅ The PowerShell script reported that certificate bindings were successfully updated on the VM.' || 
+             (contains(steps.run-script-on-vm.outputs.stdout_content, 'No HTTPS bindings found') && !contains(steps.run-script-on-vm.outputs.stdout_content, 'Successfully updated binding')) && 'ℹ️ The PowerShell script reported that no certificate binding updates were needed on the VM.' ||
+             (! contains(steps.run-script-on-vm.outputs.stdout_content, 'Successfully updated binding') && ! contains(steps.run-script-on-vm.outputs.stdout_content, 'No HTTPS bindings found')) && '❓ The PowerShell script did not report a clear update status. Please review logs.' || '' }}
+
+          --- PowerShell Script Standard Output ---
+          ${{ steps.run-script-on-vm.outputs.stdout_content }}
+
+          --- PowerShell Script Standard Error ---
+          ${{ steps.run-script-on-vm.outputs.stderr_content }}
+
+          You can view the full workflow run details here:
+          ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
