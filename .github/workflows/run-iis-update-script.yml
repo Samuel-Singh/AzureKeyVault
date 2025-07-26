@@ -225,7 +225,7 @@ jobs:
         echo "stderr_content<<EOF_STDERR" >> "$GITHUB_OUTPUT"
         echo "$LOCAL_STDERR" >> "$GITHUB_OUTPUT"
         echo "EOF_STDERR" >> "$GITHUB_OUTPUT"
-
+asdassasadas
       env:
         IIS_SCRIPT_PATH: scripts/Update-IisCertBindings.ps1 # This environment variable is for documentation/clarity here;
                                                            # the script content is read directly via 'cat'.
