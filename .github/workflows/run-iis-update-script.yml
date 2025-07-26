@@ -192,15 +192,13 @@ jobs:
             # ComponentStatus/StdErr/succeeded for script's stderr
             LOCAL_STDERR=$(echo "$AZ_RUN_COMMAND_OUTPUT" | jq -r '.value[] | select(.code == "ComponentStatus/StdErr/succeeded").message' 2>/dev/null || echo "")
 
-            # Fallback for some scenarios where stdout/stderr might be combined or simpler
-            # This part might not be needed if the above `jq` correctly separates
-            # but is kept for robustness. Ensure the most specific `jq` comes first.
-            if [ -z "$LOCAL_STDOUT" ] && [ -z "$LOCAL_STDERR" ]; then
-              # This might happen if 'az vm run-command' gives a generic error message
-              # or an older format without explicit stdout/stderr codes.
-              # In this case, dump all messages into stderr for review.
-              LOCAL_STDERR=$(echo "$AZ_RUN_COMMAND_OUTPUT" | jq -r '.value[].message' 2>/dev/null || echo "Unknown error output format.")
+            # Fallback logic for some scenarios where stdout/stderr might be combined or simpler,
+            # especially if the specific 'code' is missing. Dump everything to stderr if not
+            # explicitly identified as stdout.
+            if [ -z "$LOCAL_STDOUT" ] && [ -z "$LOCAL_STDERR" ] && [ -n "$AZ_RUN_COMMAND_OUTPUT" ]; then
+              LOCAL_STDERR=$(echo "$AZ_RUN_COMMAND_OUTPUT" | jq -r '.value[].message' 2>/dev/null || echo "Unknown or unparseable output format from az vm run-command.")
             fi
+
 
             echo "--- Standard Output (STDOUT - Should be JSON) ---"
             echo "$LOCAL_STDOUT"
@@ -246,7 +244,7 @@ jobs:
     # NEW STEP: Process per-site status from PowerShell JSON output
     - name: Generate Detailed Site Status for Email
       id: generate_site_status
-      # Only run this if the PowerShell script execution succeeded and produced stdout
+      # Only run this if the PowerShell script execution succeeded and produced stdout (which should be JSON)
       if: success() && steps.run-script-on-vm.outputs.stdout_content != ''
       run: |
         SITE_STATUS_JSON="${{ steps.run-script-on-vm.outputs.stdout_content }}"
@@ -266,23 +264,24 @@ jobs:
             HAS_CHANGES_APPLIED="true"
           fi
         else
+          # If JSON parsing fails, set an error message for the email body
           EMAIL_BODY_STATUS="Error: Could not parse PowerShell script output as JSON. Please review logs for raw stdout.\nFull stdout content:\n${SITE_STATUS_JSON}"
-          echo "Error: PowerShell stdout was not valid JSON."
-          # If JSON parsing fails, we still want to indicate a potential issue.
-          # This might trigger the email if other conditions are met (e.g., stderr has content)
-          # or if we decide to force an email on JSON parse failure.
+          echo "Error: PowerShell stdout was not valid JSON." >&2 # Log error to runner's stderr
+          # No change to HAS_CHANGES_APPLIED, as parsing failed.
         fi
         
         echo "detailed_site_status<<EOF_DETAILED_STATUS" >> "$GITHUB_OUTPUT"
         echo "$EMAIL_BODY_STATUS" >> "$GITHUB_OUTPUT"
         echo "EOF_DETAILED_STATUS" >> "$GITHUB_OUTPUT"
 
-        echo "has_changes_applied=$HAS_CHANGES_APPLIED" >> "$GITHUB_OUTPUT"
+        echo "has_changes_applied=$HAS_CHANG_APPLIED" >> "$GITHUB_OUTPUT"
       shell: bash
 
     - name: Send Email Notification for ${{ steps.extract_params.outputs.VM_NAME }}
-      # Adjust 'if' condition to use the new 'has_changes_applied' flag
-      # Also keep 'failure' and 'stderr' checks
+      # This email will be sent if:
+      # 1. Any changes were applied (has_changes_applied is true).
+      # 2. The script execution step failed (e.g., VM inaccessible, script error).
+      # 3. The PowerShell script produced any output to its standard error stream.
       if: |
         steps.generate_site_status.outputs.has_changes_applied == 'true' ||
         steps.run-script-on-vm.outcome == 'failure' ||
