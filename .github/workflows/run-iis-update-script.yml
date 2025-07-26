@@ -17,7 +17,7 @@ on:
       vm_params_glob:
         description: 'Glob pattern for VM parameters JSON files (e.g., bicep/Virtual-Machines/*-params.json)'
         required: false
-        default: 'bicep/Virtual-Machines/*.json' # Default value for manual trigger if left blank
+        default: 'bicep/Virtual-Machines/*.json'
 
 jobs:
   # Job 1: Find all VM parameter files matching the determined glob pattern
@@ -46,7 +46,7 @@ jobs:
           fi
         else
           # Hardcoded pattern for scheduled runs
-          GLOB_PATTERN="bicep/Virtual-Machines/*.json" # Adjust this if your files have a more specific naming convention (e.g., '*-params.json')
+          GLOB_PATTERN="bicep/Virtual-Machines/*.json"
         fi
 
         echo "Searching for parameter files matching: $GLOB_PATTERN"
@@ -187,17 +187,20 @@ jobs:
         LOCAL_STDERR=""
 
         if echo "$AZ_RUN_COMMAND_OUTPUT" | jq -e '.value[0]' > /dev/null; then
+          # Extract stdout (which should now be primarily JSON from the PS script)
           LOCAL_STDOUT=$(echo "$AZ_RUN_COMMAND_OUTPUT" | jq -r '.value[] | select(.code == "ComponentStatus/StdOut/succeeded").message' 2>/dev/null || echo "")
+          # Extract stderr (for other warnings/errors from PS script)
           LOCAL_STDERR=$(echo "$AZ_RUN_COMMAND_OUTPUT" | jq -r '.value[] | select(.code == "ComponentStatus/StdErr/succeeded").message' 2>/dev/null || echo "")
 
+          # Fallback for older Azure CLI output formats or if only one stream is present
           if [ -z "$LOCAL_STDOUT" ] && [ -z "$LOCAL_STDERR" ]; then
             LOCAL_STDOUT=$(echo "$AZ_RUN_COMMAND_OUTPUT" | jq -r '.value[0].message' 2>/dev/null || echo "")
             LOCAL_STDERR=$(echo "$AZ_RUN_COMMAND_OUTPUT" | jq -r '.value[1].message' 2>/dev/null || echo "")
           fi
 
-          echo "--- Standard Output (STDOUT) ---"
+          echo "--- Standard Output (STDOUT - Should be JSON) ---"
           echo "$LOCAL_STDOUT"
-          echo "--------------------------------"
+          echo "-------------------------------------------------"
 
           if [ -n "$LOCAL_STDERR" ]; then
             echo ""
@@ -227,18 +230,50 @@ jobs:
         echo "EOF_STDERR" >> "$GITHUB_OUTPUT"
 
       env:
-        IIS_SCRIPT_PATH: scripts/Update-IisCertBindings.ps1 # This environment variable is for documentation/clarity here;
-                                                           # the script content is read directly via 'cat'.
+        IIS_SCRIPT_PATH: scripts/Update-IisCertBindings.ps1
+
+    # NEW STEP: Process per-site status from PowerShell JSON output
+    - name: Generate Detailed Site Status for Email
+      id: generate_site_status
+      # Only run this if the PowerShell script execution succeeded and produced stdout
+      if: success() && steps.run-script-on-vm.outputs.stdout_content != ''
+      run: |
+        SITE_STATUS_JSON="${{ steps.run-script-on-vm.outputs.stdout_content }}"
+        EMAIL_BODY_STATUS=""
+        HAS_CHANGES_APPLIED="false" # Flag to detect if any site had changes
+
+        # Check if the stdout content is valid JSON before attempting to parse
+        if echo "$SITE_STATUS_JSON" | jq -e . > /dev/null; then
+          # Parse the JSON and iterate over each item
+          # This creates a formatted string for the email body
+          EMAIL_BODY_STATUS=$(echo "$SITE_STATUS_JSON" | jq -r '.[] | 
+            "  Site: \(.SiteName)\n    Status: \(.Status)\n    Details: \(.Details)\n"
+          ')
+
+          # Check if any site had "Changes Applied Successfully" status
+          if echo "$SITE_STATUS_JSON" | jq -e '.[] | select(.Status == "Changes Applied Successfully")' > /dev/null; then
+            HAS_CHANGES_APPLIED="true"
+          fi
+        else
+          EMAIL_BODY_STATUS="Error: Could not parse PowerShell script output as JSON. Please review logs for raw stdout.\nFull stdout content:\n${SITE_STATUS_JSON}"
+          echo "Error: PowerShell stdout was not valid JSON."
+          # If JSON parsing fails, we still want to indicate a potential issue.
+          # This might trigger the email if other conditions are met (e.g., stderr has content)
+          # or if we decide to force an email on JSON parse failure.
+        fi
+        
+        echo "detailed_site_status<<EOF_DETAILED_STATUS" >> "$GITHUB_OUTPUT"
+        echo "$EMAIL_BODY_STATUS" >> "$GITHUB_OUTPUT"
+        echo "EOF_DETAILED_STATUS" >> "$GITHUB_OUTPUT"
+
+        echo "has_changes_applied=$HAS_CHANGES_APPLIED" >> "$GITHUB_OUTPUT"
+      shell: bash
 
     - name: Send Email Notification for ${{ steps.extract_params.outputs.VM_NAME }}
-      # This 'if' condition now controls when the email is sent:
-      # - The PowerShell script reported an update (contains 'Successfully updated binding')
-      # OR
-      # - The 'run-script-on-vm' step failed (outcome == 'failure')
-      # OR
-      # - The PowerShell script reported content to stderr (stderr_content != '')
+      # Adjust 'if' condition to use the new 'has_changes_applied' flag
+      # Also keep 'failure' and 'stderr' checks
       if: |
-        contains(steps.run-script-on-vm.outputs.stdout_content, 'Successfully updated binding') ||
+        steps.generate_site_status.outputs.has_changes_applied == 'true' ||
         steps.run-script-on-vm.outcome == 'failure' ||
         steps.run-script-on-vm.outputs.stderr_content != ''
       uses: dawidd6/action-send-mail@v3
@@ -251,8 +286,7 @@ jobs:
         from: ${{ secrets.MAIL_FROM }}
         subject: |
           IIS Cert Update for VM ${{ steps.extract_params.outputs.VM_NAME }} - ${{ job.status }}
-          ${{ contains(steps.run-script-on-vm.outputs.stdout_content, 'Successfully updated binding') && '✅ Update Applied' || '' }}
-          ${{ contains(steps.run-script-on-vm.outputs.stdout_content, 'No HTTPS bindings found') && 'ℹ️ No Changes Needed' || '' }}
+          ${{ steps.generate_site_status.outputs.has_changes_applied == 'true' && '✅ Update Applied' || '' }}
           ${{ steps.run-script-on-vm.outputs.stderr_content != '' && '❌ Errors Reported' || '' }}
 
         body: |
@@ -265,12 +299,10 @@ jobs:
           Status: ${{ job.status }}
           Script Execution Outcome (of 'Execute IIS Certificate Update Script' step): ${{ steps.run-script-on-vm.outcome }}
 
-          --- Script Update Status ---
-          ${{ contains(steps.run-script-on-vm.outputs.stdout_content, 'Successfully updated binding') && '✅ The PowerShell script reported that certificate bindings were successfully updated on the VM.' || '' }}
-          ${{ contains(steps.run-script-on-vm.outputs.stdout_content, 'No HTTPS bindings found') && 'ℹ️ The PowerShell script reported that no certificate binding updates were needed on the VM.' || '' }}
-          ${{ (! contains(steps.run-script-on-vm.outputs.stdout_content, 'Successfully updated binding') && ! contains(steps.run-script-on-vm.outputs.stdout_content, 'No HTTPS bindings found')) && 'The PowerShell script did not report an error in update status. Please review logs if needed.' || '' }}
+          --- Per-Site Update Status ---
+          ${{ steps.generate_site_status.outputs.detailed_site_status }}
 
-          --- PowerShell Script Standard Output ---
+          --- PowerShell Script Standard Output (Raw JSON) ---
           ${{ steps.run-script-on-vm.outputs.stdout_content }}
 
           --- PowerShell Script Standard Error ---
