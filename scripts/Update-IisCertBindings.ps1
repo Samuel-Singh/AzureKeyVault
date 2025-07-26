@@ -1,12 +1,10 @@
-# scripts/Update-IisCertBindings.ps1
-
 # Requires the Microsoft.Web.Administration assembly (usually available on systems with IIS)
 
 Write-Host "Starting IIS Certificate Binding Update script using Microsoft.Web.Administration..."
 
 try {
     # Load the Microsoft.Web.Administration assembly
-    # Using explicit path for robustness. If this path differs on your VMs, adjust it.
+    # Using explicit path for robustness, as determined previously.
     Add-Type -Path "C:\Windows\System32\inetsrv\Microsoft.Web.Administration.dll" -ErrorAction Stop
     Write-Host "Microsoft.Web.Administration assembly loaded successfully."
 
@@ -74,7 +72,7 @@ try {
                 
                 # Check Common Name (CN) as a fallback
                 if ($_.Subject -match "CN=([^\,]+)" -and $Matches[1] -eq $hostHeader) {
-                    $cnMatches = true
+                    $cnMatches = $true
                 }
 
                 # A certificate is a match if it's valid and its SAN or CN matches the host header
