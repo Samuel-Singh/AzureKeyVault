@@ -158,10 +158,10 @@ jobs:
         from: ${{ secrets.MAIL_FROM }}
         subject: |
           IIS Cert Update for VM ${{ steps.extract_params.outputs.VM_NAME }} - ${{ job.status }}
-          ${{ contains(github.job.status, 'failure') && '❌ Workflow Failed' || '' }}
-          ${{ steps.run-script-on-vm.outcome == 'failure' && '❌ Script Step Failed' || '' }}
-          ${{ contains(steps.run-script-on-vm.outputs.script_output, 'Successfully updated binding') && '✅ Updates Applied' || '' }}
-          ${{ contains(steps.run-script-on-vm.outputs.script_output, 'Error updating binding') || contains(steps.run-script-on-vm.outputs.script_output, 'Failed to recycle') ? '⚠️ Warnings/Errors in Script Output' : '' }}
+          ${{ (contains(github.job.status, 'failure') && '❌ Workflow Failed') || '' }}
+          ${{ (steps.run-script-on-vm.outcome == 'failure' && '❌ Script Step Failed') || '' }}
+          ${{ (contains(steps.run-script-on-vm.outputs.script_output, 'Successfully updated binding') && '✅ Updates Applied') || '' }}
+          ${{ (contains(steps.run-script-on-vm.outputs.script_output, 'Error updating binding') || contains(steps.run-script-on-vm.outputs.script_output, 'Failed to recycle')) && '⚠️ Warnings/Errors in Script Output' || '' }}
 
         body: |
           Hello,
