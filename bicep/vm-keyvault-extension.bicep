@@ -1,8 +1,5 @@
-// Define parameters for your deployment
 param vmName string     // The name of your existing VM
 param location string   // The location of your existing VM
-// param resourceGroupName string // <--- THIS LINE SHOULD BE GONE
-// param iisScriptFileUri string // <--- THIS LINE SHOULD BE GONE
 
 // This is the core parameter that will hold your list of certificates for the KV extension
 param observedCertificates array = []
