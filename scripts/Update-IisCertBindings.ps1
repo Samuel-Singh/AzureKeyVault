@@ -1,10 +1,6 @@
-# Requires the Microsoft.Web.Administration assembly (usually available on systems with IIS)
-
 Write-Host "Starting IIS Certificate Binding Update script using Microsoft.Web.Administration..."
 
 try {
-    # Load the Microsoft.Web.Administration assembly
-    # Using explicit path for robustness, as determined previously.
     Add-Type -Path "C:\Windows\System32\inetsrv\Microsoft.Web.Administration.dll" -ErrorAction Stop
     Write-Host "Microsoft.Web.Administration assembly loaded successfully."
 
@@ -125,7 +121,6 @@ try {
             }
         } # End foreach $binding
 
-        # Application Pool Recycling Logic for the current site
         # This block runs only if at least one binding in the current site was updated.
         if ($bindingUpdatedForSite) {
             Write-Host "  Attempting to recycle application pool for site '$($site.Name)'..."
