@@ -1,13 +1,13 @@
 name: IIS Certificate Update (Scheduled & Manual)
 
 on:
-  schedule:
+  #schedule:
     # Runs every hour at 30 minutes past the hour. (UTC time)
     # Adjust '30 * * * *' to your preferred schedule.
     # For example:
     #   '0 */4 * * *'  - Every 4 hours at minute 0
     #   '0 0 * * *'    - Every day at midnight UTC
-    - cron: '30 * * * *'
+    #- cron: '30 * * * *'
 
   workflow_dispatch:
     inputs:
